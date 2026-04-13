@@ -37,7 +37,7 @@ export async function performCreateRisk(input: RiskInput): Promise<RiskResult> {
     await page.goto(config.dashboardUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
     await page.waitForTimeout(2000);
 
-    const createBtn = page.getByTestId("btn-create-risk");
+const createBtn = page.getByTestId("button-add-risk");
     await createBtn.waitFor({ state: "visible", timeout: 10_000 });
     await createBtn.click();
     await page.waitForTimeout(1000);
