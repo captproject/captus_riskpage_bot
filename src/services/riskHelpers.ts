@@ -307,6 +307,30 @@ export async function deleteRiskFromTable(
   }
 }
 
+// ─── Assert Risk Visible in Page ─────────────────────────────────────────────
+
+export async function riskVisibleInPage(page: Page, title: string): Promise<boolean> {
+  try {
+    await page.locator("body").filter({ hasText: title }).waitFor({ state: "visible", timeout: 3_000 });
+    return true;
+  } catch { return false; }
+}
+
+// ─── Click First Edit Button (Heatmap) ──────────────────────────────────────
+
+export async function clickFirstEditButton(page: Page): Promise<boolean> {
+  const editBtn = page.locator('[data-testid^="button-edit-heatmap-risk-"]').first();
+  try {
+    await editBtn.waitFor({ state: "visible", timeout: 5_000 });
+    await editBtn.click();
+    await page.getByTestId("input-risk-title").waitFor({ state: "visible", timeout: 5_000 });
+    return true;
+  } catch {
+    console.log("[Edit] Edit button not found or form didn't open");
+    return false;
+  }
+}
+
 // ─── Normalize Values for Comparison ─────────────────────────────────────────
 
 export function normalize(v: any): string {

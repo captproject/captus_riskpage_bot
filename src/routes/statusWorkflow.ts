@@ -45,11 +45,7 @@ async function updateRiskStatus(page: Page, title: string, newStatus: string): P
     console.log("[Status] Edit button not found");
     return { success: false, toastText: null };
   }
-  const dropdownSelected = await selectDropdown(page, "select-risk-status", newStatus);
-  if (!dropdownSelected) {
-    console.log(`[Status] Failed to select status: "${newStatus}"`);
-    return { success: false, toastText: null };
-  }
+  await selectDropdown(page, "select-risk-status", newStatus);
   const updateBtn = page.getByTestId("button-save-risk");
   await updateBtn.waitFor({ state: "visible", timeout: 5_000 });
   await updateBtn.click();

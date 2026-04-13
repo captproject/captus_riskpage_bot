@@ -23,7 +23,7 @@ export async function uploadScreenshot(
           apikey: config.supabaseKey,
           Authorization: `Bearer ${config.supabaseKey}`,
         },
-        body: buffer,
+        body: buffer as unknown as BodyInit,
       }
     );
 
