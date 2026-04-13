@@ -1,290 +1,301 @@
-// ─── Audit Log Route ──────────────────────────────────────────────────────────
-// POST /audit-log
-// Performs 6 actions (Login, Create, Update, Delete, Message, Logout)
-// Then verifies each action's audit trail entry using filters.
-
+// ─── Audit Log Route — matches old server.ts exactly ──────────────────────────
 import { BrowserContext, Page } from "playwright";
 import { AuditLogInput, AuditStepResult, AuditLogResult } from "../utils/types";
 import { config } from "../server";
 import { createContextAndLogin } from "../services/loginService";
-import { fillRiskForm, selectDropdown, detectToast } from "../services/riskHelpers";
-import { safeClose } from "../services/browserManager";
+import { fillRiskForm, searchRisk, detectToast, clickFirstEditButton, riskVisibleInPage } from "../services/riskHelpers";
+import { safeClose, invalidateSession } from "../services/browserManager";
 import { captureFailure } from "../utils/screenshot";
 
-// ─── Audit Trail Helpers ─────────────────────────────────────────────────────
+// ─── Audit Helpers (exact from old server.ts) ────────────────────────────────
+
+async function navigateTo(page: Page, url: string): Promise<void> {
+  await page.goto(url, { waitUntil: "networkidle", timeout: config.navigationTimeout });
+  await page.waitForTimeout(2_000);
+}
 
 async function navigateToAuditTrail(page: Page): Promise<void> {
   console.log("[Audit] Navigating to audit trail");
   await page.goto(config.auditUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
-  await page.waitForTimeout(2500);
+  await page.waitForTimeout(2_500);
   await page.waitForSelector('[data-testid^="row-audit-log-"]', { timeout: 15_000 }).catch(() => {
     console.log("[Audit] No audit rows visible yet");
   });
 }
 
-async function filterAuditByAction(page: Page, actionName: string): Promise<void> {
+async function applyAuditActionFilter(page: Page, actionName: string): Promise<void> {
   try {
-    const filterTrigger = page.getByTestId("select-filter-action");
-    const isVisible = await filterTrigger.isVisible().catch(() => false);
-    if (isVisible) {
-      await filterTrigger.click();
-      await page.waitForTimeout(500);
-      await page.getByRole("option", { name: actionName }).click();
-      await page.waitForTimeout(1500);
-    }
-  } catch {
-    console.log(`[Audit] Could not filter by "${actionName}"`);
+    const trigger = page.getByTestId("select-filter-action");
+    await trigger.waitFor({ state: "visible", timeout: 5_000 });
+    await trigger.click();
+    await page.waitForTimeout(500);
+    const option = page.getByRole("option", { name: actionName });
+    await option.waitFor({ state: "visible", timeout: 3_000 });
+    await option.click();
+    await page.waitForTimeout(1_500);
+    console.log(`[Audit] Applied action filter: "${actionName}"`);
+  } catch (err) {
+    console.log(`[Audit] Failed to apply filter "${actionName}": ${(err as Error).message}`);
   }
 }
 
-async function readTopAuditRow(page: Page): Promise<{
-  action: string | null;
-  entity: string | null;
-  severity: string | null;
-  summary: string | null;
-}> {
-  return page.evaluate(() => {
-    const firstRow = document.querySelector('[data-testid^="row-audit-log-"]');
-    if (!firstRow) return { action: null, entity: null, severity: null, summary: null };
-
-    const cells = firstRow.querySelectorAll("td");
-    return {
-      action: cells[1]?.textContent?.trim() || null,
-      entity: cells[2]?.textContent?.trim() || null,
-      severity: cells[3]?.textContent?.trim() || null,
-      summary: cells[4]?.textContent?.trim() || null,
-    };
-  });
-}
-
-async function clearAuditFilter(page: Page): Promise<void> {
-  try {
-    const clearBtn = page.locator('[data-testid="btn-clear-filters"], button:has-text("Clear")');
-    const isVisible = await clearBtn.isVisible().catch(() => false);
-    if (isVisible) {
-      await clearBtn.click();
-      await page.waitForTimeout(1000);
-    }
-  } catch {
-    // Refresh page to clear
-    await page.goto(config.auditUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
-    await page.waitForTimeout(2000);
+async function clearAuditFilters(page: Page): Promise<void> {
+  const clearBtn = page.getByTestId("button-clear-audit-filters")
+    .or(page.locator('button:has-text("Clear")'))
+    .or(page.locator('button:has-text("Reset")'));
+  const isVisible = await clearBtn.first().isVisible().catch(() => false);
+  if (isVisible) {
+    await clearBtn.first().click();
+    await page.waitForTimeout(1_500);
+    console.log("[Audit] Filters cleared");
   }
 }
 
-// ─── Step Definitions ────────────────────────────────────────────────────────
+async function verifyAuditEntry(
+  page: Page, filterAction: string, expectedAction: string,
+  expectedEntity: string, expectedSeverity: string, summaryContains: string,
+): Promise<AuditStepResult> {
+  const result: AuditStepResult = {
+    status: "fail", filter_used: filterAction, expected_action: expectedAction,
+    actual_action: null, expected_entity: expectedEntity, actual_entity: null,
+    expected_severity: expectedSeverity, actual_severity: null,
+    summary_contains: summaryContains, summary_found: false,
+    action_match: false, entity_match: false, severity_match: false,
+  };
+  try {
+    await navigateToAuditTrail(page);
+    await clearAuditFilters(page);
+    await applyAuditActionFilter(page, filterAction);
 
-interface AuditVerifyStep {
-  key: string;
-  label: string;
-  filterAction: string;
-  expectedAction: string;
-  expectedEntity: string;
-  expectedSeverity: string;
-  summaryContains: string;
+    const rows = page.locator('[data-testid^="row-audit-log-"]');
+    const rowCount = await rows.count();
+    console.log(`[Audit] ${filterAction}: ${rowCount} rows visible`);
+    if (rowCount === 0) return result;
+
+    for (let i = 0; i < Math.min(rowCount, 20); i++) {
+      const row = rows.nth(i);
+      const summaryText = await row.locator("td:nth-child(5)").textContent().catch(() => "") || "";
+      if (summaryText.toLowerCase().includes(summaryContains.toLowerCase())) {
+        result.summary_found = true;
+        result.actual_action = (await row.locator("td:nth-child(3)").textContent().catch(() => "") || "").trim();
+        const entityEl = row.locator("td:nth-child(4) .capitalize").first();
+        result.actual_entity = (await entityEl.textContent().catch(() => "") || "").trim();
+        result.actual_severity = (await row.locator("td:nth-child(6)").textContent().catch(() => "") || "").trim().toLowerCase();
+        result.action_match = result.actual_action?.toLowerCase() === expectedAction.toLowerCase();
+        result.entity_match = result.actual_entity?.toLowerCase() === expectedEntity.toLowerCase();
+        result.severity_match = result.actual_severity === expectedSeverity.toLowerCase();
+        result.status = (result.action_match && result.entity_match && result.severity_match) ? "pass" : "fail";
+        console.log(`[Audit] ${filterAction}: action="${result.actual_action}"(${result.action_match ? "✅" : "❌"}) entity="${result.actual_entity}"(${result.entity_match ? "✅" : "❌"}) severity="${result.actual_severity}"(${result.severity_match ? "✅" : "❌"}) → ${result.status}`);
+        return result;
+      }
+    }
+    console.log(`[Audit] ${filterAction}: No row with summary containing: "${summaryContains}"`);
+    return result;
+  } catch (err) {
+    console.log(`[Audit] ${filterAction} error: ${(err as Error).message}`);
+    return result;
+  }
 }
 
-const AUDIT_STEPS: AuditVerifyStep[] = [
-  { key: "login", label: "Login", filterAction: "Login", expectedAction: "Login", expectedEntity: "Session", expectedSeverity: "Info", summaryContains: "logged in" },
-  { key: "create_risk", label: "Create", filterAction: "Create", expectedAction: "Create", expectedEntity: "Risk", expectedSeverity: "Info", summaryContains: "risk" },
-  { key: "update_risk", label: "Update", filterAction: "Update", expectedAction: "Update", expectedEntity: "Risk", expectedSeverity: "Info", summaryContains: "risk" },
-  { key: "delete_risk", label: "Delete", filterAction: "Delete", expectedAction: "Delete", expectedEntity: "Risk", expectedSeverity: "Warning", summaryContains: "risk" },
-  { key: "chat_message", label: "Message", filterAction: "Message", expectedAction: "Message", expectedEntity: "Chat Message", expectedSeverity: "Info", summaryContains: "message" },
-  { key: "logout", label: "Logout", filterAction: "Logout", expectedAction: "Logout", expectedEntity: "Session", expectedSeverity: "Info", summaryContains: "logged out" },
-];
+async function sendChatMessage(page: Page, message: string): Promise<boolean> {
+  try {
+    console.log(`[Chat] Sending: "${message}"`);
+    const chatBtn = page.locator('[data-testid="button-chat-widget"]');
+    await chatBtn.waitFor({ state: "visible", timeout: 10_000 });
+    await chatBtn.click();
+    await page.waitForTimeout(1_500);
+    const chatInput = page.locator('input[placeholder="Type a message..."]');
+    await chatInput.waitFor({ state: "visible", timeout: 5_000 });
+    await chatInput.fill(message);
+    await page.waitForTimeout(500);
+    const sendBtn = page.locator('button[type="submit"].rounded-full');
+    await sendBtn.waitFor({ state: "visible", timeout: 5_000 });
+    await sendBtn.click();
+    await page.waitForTimeout(5_000);
+    console.log("[Chat] Message sent");
+    return true;
+  } catch (err) {
+    console.log(`[Chat] Failed: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+async function performLogout(page: Page): Promise<boolean> {
+  try {
+    console.log("[Logout] Starting");
+    const avatar = page.locator("div.rounded-full span.text-white").filter({ hasText: /^[A-Z]{1,2}$/ }).first();
+    await avatar.waitFor({ state: "visible", timeout: 5_000 });
+    await avatar.click();
+    await page.waitForTimeout(1_000);
+    const logoutBtn = page.locator('[data-testid="menu-item-logout"]');
+    await logoutBtn.waitFor({ state: "visible", timeout: 5_000 });
+    await logoutBtn.click();
+    await page.waitForTimeout(3_000);
+    const url = page.url();
+    const success = url.includes("/login") || url.includes("/sign-in");
+    console.log(`[Logout] ${success ? "Success" : "Failed"} — URL: ${url}`);
+    return success;
+  } catch (err) {
+    console.log(`[Logout] Failed: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+async function performFreshLogin(page: Page, username: string, password: string): Promise<boolean> {
+  try {
+    await page.goto(config.loginUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
+    const emailInput = page.locator('input[name="email"]');
+    await emailInput.waitFor({ state: "visible", timeout: 15_000 });
+    await emailInput.fill(username);
+    const passwordInput = page.locator('input[name="password"]');
+    await passwordInput.waitFor({ state: "visible", timeout: 5_000 });
+    await passwordInput.fill(password);
+    const loginBtn = page.getByTestId("button-login");
+    await loginBtn.waitFor({ state: "visible", timeout: 5_000 });
+    await loginBtn.click();
+    await page.waitForURL((url) => !url.pathname.includes("/login"), { timeout: 15_000 }).catch(() => {});
+    return !page.url().includes("/login");
+  } catch { return false; }
+}
+
+async function selectCompanyForAudit(page: Page, companyName = "demo"): Promise<void> {
+  try {
+    const companyBtn = page.getByTestId("button-company-selector");
+    await companyBtn.waitFor({ state: "visible", timeout: 10_000 });
+    await companyBtn.click();
+    const option = page.locator('[role="menuitem"]').filter({ hasText: companyName }).first();
+    await option.waitFor({ state: "visible", timeout: 5_000 });
+    await option.click();
+    await page.waitForTimeout(2_000);
+  } catch {}
+}
 
 // ─── Main Function ───────────────────────────────────────────────────────────
 
 export async function performAuditLog(input: AuditLogInput): Promise<AuditLogResult> {
+  const timestamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 15);
+  const riskTitle = `AuditTest_${timestamp}`;
+  const chatMsg = input.chat_message || "audit test message";
+  const result: AuditLogResult = {
+    status: "error", message: "", username: input.username, risk_title: riskTitle,
+    steps_summary: "", total_steps: 6, passed: 0, failed: 0,
+    steps: {} as Record<string, AuditStepResult>, screenshots: { failure: null },
+  };
   let context: BrowserContext | null = null;
 
-  const riskTitle = input.risk_title || `AuditTest-${Date.now()}`;
-  const result: AuditLogResult = {
-    status: "error",
-    message: "",
-    username: input.username,
-    risk_title: riskTitle,
-    total_steps: 6,
-    passed: 0,
-    failed: 0,
-    steps_summary: "",
-    steps: {},
-    screenshots: {},
-  };
-
   try {
-    console.log(`[AuditLog] Starting 6-step audit verification for ${input.username}`);
     const session = await createContextAndLogin(input.username, input.password);
     context = session.context;
     const page = session.page;
 
-    // ── Action 1: Login (already done via createContextAndLogin) ──
-    console.log("[AuditLog] Step 1: Login — already completed");
+    // ACTION 1: Login (already done)
+    console.log("[AuditLog] === ACTION 1: Login ===");
 
-    // ── Action 2: Create Risk ──
-    console.log("[AuditLog] Step 2: Creating risk");
-    await page.goto(config.dashboardUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
-    await page.waitForTimeout(2000);
+    // ACTION 2: Create Risk
+    console.log("[AuditLog] === ACTION 2: Create Risk ===");
+    await navigateTo(page, config.dashboardUrl);
+    await page.waitForTimeout(1_500);
+    const addBtn = page.getByTestId("button-add-risk");
+    await addBtn.waitFor({ state: "visible", timeout: 10_000 });
+    await addBtn.click();
+    await page.getByTestId("input-risk-title").waitFor({ state: "visible", timeout: 5_000 });
+    await fillRiskForm(page, { title: riskTitle, description: "Audit log test risk", category: "Technical", status: "Open", impact: "3 - Medium", likelihood: "3 - Medium" });
+    const saveBtn = page.getByTestId("button-save-risk");
+    await saveBtn.waitFor({ state: "visible", timeout: 5_000 });
+    await saveBtn.click();
+    const createToast = await detectToast(page, "Risk created successfully");
+    console.log(`[AuditLog] Create: ${createToast.match ? "OK" : "FAIL"}`);
+    await page.waitForTimeout(2_000);
 
-const createBtn = page.getByTestId("button-add-risk");    await createBtn.waitFor({ state: "visible", timeout: 10_000 });
-    await createBtn.click();
-    await page.waitForTimeout(1000);
+    // ACTION 3: Edit Risk
+    console.log("[AuditLog] === ACTION 3: Edit Risk ===");
+    await navigateTo(page, config.dashboardUrl);
+    await page.waitForTimeout(1_500);
+    await searchRisk(page, riskTitle);
+    if (await clickFirstEditButton(page)) {
+      await fillRiskForm(page, { description: "Updated by audit log test" });
+      const updateBtn = page.getByTestId("button-save-risk");
+      await updateBtn.waitFor({ state: "visible", timeout: 5_000 });
+      await updateBtn.click();
+      const editToast = await detectToast(page, "Risk updated successfully");
+      console.log(`[AuditLog] Edit: ${editToast.match ? "OK" : "FAIL"}`);
+    } else { console.log("[AuditLog] Edit: SKIP — edit button not found"); }
+    await page.waitForTimeout(2_000);
 
-    await fillRiskForm(page, {
-      title: riskTitle,
-      description: input.risk_description || "Audit test risk",
-      category: input.risk_category || "Technical",
-      impact: input.risk_impact || "3 - Medium",
-      likelihood: input.risk_likelihood || "3 - Medium",
-    });
-
-    const submitBtn = page.getByTestId("btn-submit-risk");
-    await submitBtn.click();
-    await page.waitForTimeout(2000);
-    await detectToast(page, "successfully");
-
-    // ── Action 3: Update Risk ──
-    console.log("[AuditLog] Step 3: Updating risk");
-    await page.goto(config.tableUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
-    await page.waitForTimeout(2000);
-
-    await page.evaluate((title) => {
-      const rows = document.querySelectorAll("tr");
-      for (const row of rows) {
-        if (row.textContent?.includes(title)) {
-          const editBtn = row.querySelector('[data-testid*="edit"], button[aria-label*="edit"]');
-          if (editBtn) { (editBtn as HTMLElement).click(); break; }
-        }
-      }
-    }, riskTitle);
-    await page.waitForTimeout(1500);
-
-    await fillRiskForm(page, { description: "Updated by audit test" });
-    const updateSubmit = page.getByTestId("btn-submit-risk");
-    await updateSubmit.click();
-    await page.waitForTimeout(2000);
-    await detectToast(page, "successfully");
-
-    // ── Action 4: Delete Risk ──
-    console.log("[AuditLog] Step 4: Deleting risk");
-    await page.goto(config.tableUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
-    await page.waitForTimeout(2000);
-
-    await page.evaluate((title) => {
-      const rows = document.querySelectorAll("tr");
-      for (const row of rows) {
-        if (row.textContent?.includes(title)) {
-          const deleteBtn = row.querySelector('[data-testid*="delete"], button[aria-label*="delete"]');
-          if (deleteBtn) { (deleteBtn as HTMLElement).click(); break; }
-        }
-      }
-    }, riskTitle);
-    await page.waitForTimeout(1000);
-
-    const confirmBtn = page.locator('button:has-text("Confirm"), button:has-text("Delete"), [data-testid="confirm-delete"]');
-    const hasConfirm = await confirmBtn.isVisible().catch(() => false);
-    if (hasConfirm) {
-      await confirmBtn.click();
-      await page.waitForTimeout(2000);
-    }
-    await detectToast(page, "successfully");
-
-    // ── Action 5: Send Chat Message ──
-    console.log("[AuditLog] Step 5: Sending chat message");
+    // ACTION 4: Delete Risk
+    console.log("[AuditLog] === ACTION 4: Delete Risk ===");
+    await navigateTo(page, config.tableUrl);
+    await page.waitForTimeout(1_500);
+    await searchRisk(page, riskTitle);
+    const riskRow = page.locator("text=" + riskTitle).first();
     try {
-      const chatInput = page.locator('[data-testid="chat-input"], textarea[placeholder*="message"], input[placeholder*="message"]');
-      const chatVisible = await chatInput.isVisible().catch(() => false);
-      if (chatVisible) {
-        await chatInput.fill(input.chat_message || "Audit test message");
-        const sendBtn = page.locator('[data-testid="btn-send-message"], button[aria-label*="send"]');
-        await sendBtn.click();
-        await page.waitForTimeout(2000);
-      } else {
-        console.log("[AuditLog] Chat input not found — skipping");
-      }
-    } catch {
-      console.log("[AuditLog] Chat message step skipped");
+      await riskRow.waitFor({ state: "visible", timeout: 5_000 });
+      await riskRow.click();
+      await page.waitForTimeout(1_500);
+      const deleteBtn = page.locator('[data-testid^="button-delete-risk-"]').first();
+      await deleteBtn.waitFor({ state: "visible", timeout: 5_000 });
+      await deleteBtn.click();
+      const deleteToast = await detectToast(page, "Risk deleted successfully");
+      console.log(`[AuditLog] Delete: ${deleteToast.match ? "OK" : "FAIL"}`);
+    } catch { console.log("[AuditLog] Delete: SKIP — risk not found in table"); }
+    await page.waitForTimeout(2_000);
+
+    // ACTION 5: Chat Message
+    console.log("[AuditLog] === ACTION 5: Chat Message ===");
+    await navigateTo(page, config.dashboardUrl);
+    await page.waitForTimeout(1_500);
+    const chatOk = await sendChatMessage(page, chatMsg);
+    console.log(`[AuditLog] Chat: ${chatOk ? "OK" : "FAIL"}`);
+    await page.waitForTimeout(2_000);
+
+    // ACTION 6: Logout
+    console.log("[AuditLog] === ACTION 6: Logout ===");
+    const logoutOk = await performLogout(page);
+    console.log(`[AuditLog] Logout: ${logoutOk ? "OK" : "FAIL"}`);
+
+    // RE-LOGIN for verification
+    console.log("[AuditLog] === RE-LOGIN for verification ===");
+    invalidateSession();
+    const reloginOk = await performFreshLogin(page, input.username, input.password);
+    if (!reloginOk) {
+      result.status = "error"; result.message = "Re-login failed for audit verification";
+      result.screenshots.failure = await captureFailure(context, "audit_relogin_fail");
+      return result;
     }
+    await selectCompanyForAudit(page, "demo");
+    await page.waitForTimeout(2_000);
 
-    // ── Action 6: Logout ──
-    console.log("[AuditLog] Step 6: Logging out");
-    try {
-      const logoutBtn = page.locator('[data-testid="btn-logout"], button:has-text("Logout"), button:has-text("Sign out")');
-      const logoutVisible = await logoutBtn.isVisible().catch(() => false);
-      if (logoutVisible) {
-        await logoutBtn.click();
-        await page.waitForTimeout(3000);
-      }
-    } catch {
-      console.log("[AuditLog] Logout step skipped");
-    }
+    // VERIFICATION PHASE
+    console.log("[AuditLog] === VERIFICATION PHASE ===");
+    result.steps.login = await verifyAuditEntry(page, "Login", "Login", "Session", "Info", input.username);
+    result.steps.create_risk = await verifyAuditEntry(page, "Create", "Create", "Risk", "Info", riskTitle);
+    result.steps.edit_risk = await verifyAuditEntry(page, "Update", "Update", "Risk", "Info", riskTitle);
+    result.steps.delete_risk = await verifyAuditEntry(page, "Delete", "Delete", "Risk", "Warning", riskTitle);
+    result.steps.chat_message = await verifyAuditEntry(page, "Message", "Message", "Chat Message", "Info", "user message");
+    result.steps.logout = await verifyAuditEntry(page, "Logout", "Logout", "Session", "Info", "User logged out");
 
-    // ── Verification Phase: Re-login and check audit trail ──
-    console.log("[AuditLog] Re-logging in to verify audit trail");
-    const verifySession = await createContextAndLogin(input.username, input.password);
-    await safeClose(context);
-    context = verifySession.context;
-    const verifyPage = verifySession.page;
-
-    await navigateToAuditTrail(verifyPage);
-
-    // Verify each step
-    for (const step of AUDIT_STEPS) {
-      console.log(`[AuditLog] Verifying: ${step.label}`);
-      await clearAuditFilter(verifyPage);
-      await filterAuditByAction(verifyPage, step.filterAction);
-
-      const row = await readTopAuditRow(verifyPage);
-
-      const stepResult: AuditStepResult = {
-        status: "fail",
-        filter_used: step.filterAction,
-        expected_action: step.expectedAction,
-        actual_action: row.action,
-        expected_entity: step.expectedEntity,
-        actual_entity: row.entity,
-        expected_severity: step.expectedSeverity,
-        actual_severity: row.severity,
-        summary_contains: step.summaryContains,
-        summary_found: row.summary?.toLowerCase().includes(step.summaryContains.toLowerCase()) || false,
-        action_match: row.action?.toLowerCase() === step.expectedAction.toLowerCase(),
-        entity_match: row.entity?.toLowerCase() === step.expectedEntity.toLowerCase(),
-        severity_match: row.severity?.toLowerCase() === step.expectedSeverity.toLowerCase(),
-      };
-
-      stepResult.status = (stepResult.action_match && stepResult.entity_match && stepResult.severity_match)
-        ? "pass" : "fail";
-
-      result.steps[step.key] = stepResult;
-
-      if (stepResult.status === "pass") result.passed++;
-      else result.failed++;
-
-      console.log(`[AuditLog] ${step.label}: ${stepResult.status} (action: ${row.action}, entity: ${row.entity})`);
-    }
-
-    // Final assessment
-    result.status = result.failed === 0 ? "pass" : "fail";
+    // Calculate results
+    const stepKeys = ["login", "create_risk", "edit_risk", "delete_risk", "chat_message", "logout"];
     const stepLabels = ["Login", "Create", "Update", "Delete", "Message", "Logout"];
-    const stepKeys = ["login", "create_risk", "update_risk", "delete_risk", "chat_message", "logout"];
+    result.passed = stepKeys.filter((k) => result.steps[k]?.status === "pass").length;
+    result.failed = result.total_steps - result.passed;
+    result.status = result.failed === 0 ? "pass" : "fail";
     result.steps_summary = stepLabels.map((label, i) => {
       const s = result.steps[stepKeys[i]];
       return `${label}:${s?.status === "pass" ? "✅" : "❌"}`;
     }).join(" ");
     result.message = result.steps_summary;
 
-    if (result.failed > 0) {
+    if (result.failed > 0 && !result.screenshots.failure) {
       result.screenshots.failure = await captureFailure(context, "audit_verification_fail");
     }
-
-    console.log(`[AuditLog] Result: ${result.status} (${result.passed}/${result.total_steps}) — ${result.message}`);
+    console.log(`[AuditLog] === RESULT: ${result.status.toUpperCase()} (${result.passed}/${result.total_steps}) ===`);
+    console.log(`[AuditLog] ${result.steps_summary}`);
     return result;
   } catch (err) {
-    result.status = "error";
-    result.message = (err as Error).message;
     result.screenshots.failure = await captureFailure(context, "audit_error");
+    result.status = "error"; result.message = (err as Error).message;
+    console.log(`[AuditLog] Error: ${result.message}`);
     return result;
-  } finally {
-    await safeClose(context);
-  }
+  } finally { await safeClose(context); }
 }

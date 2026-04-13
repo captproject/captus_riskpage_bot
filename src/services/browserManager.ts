@@ -197,7 +197,8 @@ export function getCachedSessionUsername(): string | null {
 export async function blockResources(page: Page): Promise<void> {
   await page.route("**/*", (route: Route) => {
     const type = route.request().resourceType();
-if (["image", "font", "media"].includes(type)) {      route.abort();
+    if (["image", "font", "media", "stylesheet"].includes(type)) {
+      route.abort();
     } else {
       route.continue();
     }

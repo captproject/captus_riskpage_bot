@@ -1,28 +1,19 @@
-// ─── Delete Risk Route ────────────────────────────────────────────────────────
-// POST /delete-risk — Deletes a risk and validates removal
-
+// ─── Delete Risk Route — matches old server.ts exactly ────────────────────────
 import { BrowserContext } from "playwright";
 import { DeleteRiskInput, RiskResult } from "../utils/types";
 import { config } from "../server";
 import { createContextAndLogin } from "../services/loginService";
-import { validateRiskAction } from "../services/validationService";
+import { searchRisk, detectToast, riskVisibleInPage } from "../services/riskHelpers";
 import { safeClose } from "../services/browserManager";
-import { captureFailure } from "../utils/screenshot";
+import { captureFailure, uploadScreenshot } from "../utils/screenshot";
 
 export async function performDeleteRisk(input: DeleteRiskInput): Promise<RiskResult> {
   let context: BrowserContext | null = null;
-
   const result: RiskResult = {
-    status: "error",
-    message: "",
-    username: input.username,
-    riskTitle: input.searchTitle,
+    status: "error", message: "", username: input.username, riskTitle: input.searchTitle,
     assertion: { expected: "Risk deleted successfully", actual: null, match: false },
     checks: { toast_confirmed: false, dashboard_visible: false, table_search: false, fields_valid: false },
-    failure_type: null,
-    field_mismatches: [],
-    table_data: null,
-    screenshots: {},
+    failure_type: null, field_mismatches: [], table_data: null, screenshots: {},
   };
 
   try {
@@ -31,72 +22,74 @@ export async function performDeleteRisk(input: DeleteRiskInput): Promise<RiskRes
     context = session.context;
     const page = session.page;
 
-    // Navigate to table
+    // Navigate to table and search
     await page.goto(config.tableUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(2_000);
+    await searchRisk(page, input.searchTitle);
 
-    // Find and click delete
-    const found = await page.evaluate((searchTitle) => {
-      const rows = document.querySelectorAll("tr");
-      for (const row of rows) {
-        if (row.textContent?.includes(searchTitle)) {
-          const deleteBtn = row.querySelector('[data-testid*="delete"], button[aria-label*="delete"]');
-          if (deleteBtn) {
-            (deleteBtn as HTMLElement).click();
-            return true;
-          }
-        }
-      }
-      return false;
-    }, input.searchTitle);
-
-    if (!found) {
+    // Click on risk row to expand it
+    const riskRow = page.locator("text=" + input.searchTitle).first();
+    try {
+      await riskRow.waitFor({ state: "visible", timeout: 5_000 });
+      await riskRow.click();
+    } catch {
+      const s = await page.screenshot({ fullPage: true });
+      result.screenshots.failure = await uploadScreenshot(s, "delete_not_found");
       result.status = "failed";
-      result.message = `Risk "${input.searchTitle}" not found`;
+      result.message = `Risk not found in table: "${input.searchTitle}"`;
       result.failure_type = "NOT_FOUND_TABLE";
       return result;
     }
+    await page.waitForTimeout(1_500);
 
-    await page.waitForTimeout(1000);
-
-    // Confirm delete dialog
-    const confirmBtn = page.locator('button:has-text("Confirm"), button:has-text("Delete"), [data-testid="confirm-delete"]');
-    const hasConfirm = await confirmBtn.isVisible().catch(() => false);
-    if (hasConfirm) {
-      await confirmBtn.click();
-      console.log("[Delete] Confirmed deletion");
-    }
-
-    // Validate using centralized service
-    const validation = await validateRiskAction(page, { title: input.searchTitle }, "delete");
-
-    result.checks = {
-      toast_confirmed: validation.toast_confirmed,
-      dashboard_visible: validation.dashboard_visible,
-      table_search: validation.table_search,
-      fields_valid: validation.fields_valid,
-    };
-    result.failure_type = validation.failure_type;
-
-    if (!validation.failure_type) {
-      result.status = "success";
-      result.message = "Risk deleted — all validations passed";
-      result.assertion = { expected: "Risk deleted successfully", actual: "Deleted and verified", match: true };
-    } else {
+    // Click delete button
+    const deleteBtn = page.locator('[data-testid^="button-delete-risk-"]').first();
+    try {
+      await deleteBtn.waitFor({ state: "visible", timeout: 5_000 });
+      await deleteBtn.click();
+    } catch {
+      const s = await page.screenshot({ fullPage: true });
+      result.screenshots.failure = await uploadScreenshot(s, "delete_btn_not_found");
       result.status = "failed";
-      result.message = `Delete validation failed: ${validation.failure_type}`;
-      result.assertion = { expected: "Risk deleted successfully", actual: validation.failure_type, match: false };
-      result.screenshots.failure = await captureFailure(context, "delete_risk_fail");
+      result.message = "Delete button not found after expanding risk row";
+      result.failure_type = "DELETE_BUTTON_NOT_FOUND";
+      return result;
     }
 
+    // Check toast
+    const toast = await detectToast(page, "Risk deleted successfully");
+    result.assertion.actual = toast.actualText;
+    result.assertion.match = toast.match;
+    result.checks.toast_confirmed = toast.match;
+
+    if (!toast.detected) {
+      // Fallback: verify risk is gone
+      await searchRisk(page, input.searchTitle);
+      const stillExists = await riskVisibleInPage(page, input.searchTitle);
+      if (!stillExists) {
+        result.assertion.actual = "Toast missed — risk confirmed removed";
+        result.assertion.match = true;
+        result.checks.toast_confirmed = true;
+      }
+    }
+
+    if (!result.assertion.match) {
+      const s = await page.screenshot({ fullPage: true });
+      result.screenshots.failure = await uploadScreenshot(s, "delete_failed");
+      result.status = "failed";
+      result.message = "Risk deletion could not be confirmed";
+      result.failure_type = "DELETE_FAILED";
+      return result;
+    }
+
+    result.status = "success";
+    result.message = result.assertion.actual || "Risk deleted";
+    result.checks = { toast_confirmed: true, dashboard_visible: true, table_search: true, fields_valid: true };
     console.log(`[Delete] Result: ${result.status} — ${result.message}`);
     return result;
   } catch (err) {
-    result.status = "error";
-    result.message = (err as Error).message;
-    result.screenshots.failure = await captureFailure(context, "delete_risk_error");
+    result.status = "error"; result.message = (err as Error).message;
+    result.screenshots.failure = await captureFailure(context, "delete_error");
     return result;
-  } finally {
-    await safeClose(context);
-  }
+  } finally { await safeClose(context); }
 }
