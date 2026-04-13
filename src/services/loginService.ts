@@ -143,6 +143,21 @@ export async function createContextAndLogin(
   // Post-login: select company (critical step — old bot does this)
   console.log(`[Login] Post-login URL: ${page.url()}`);
   const companySelected = await selectCompany(page, "demo");
+  // Post-login: select project
+    try {
+      console.log('[Project] Selecting project: "Test"');
+      const projectBtn = page.getByTestId("button-project-selector");
+      await projectBtn.waitFor({ state: "visible", timeout: 10_000 });
+      await projectBtn.click();
+      await page.locator('[role="menuitem"]').first().waitFor({ state: "visible", timeout: 5_000 });
+      const projectOption = page.locator('[role="menuitem"]').filter({ hasText: "Test" }).first();
+      await projectOption.waitFor({ state: "visible", timeout: 5_000 });
+      await projectOption.click();
+      await page.waitForTimeout(2_000);
+      console.log('[Project] Selected "Test" successfully');
+    } catch (err) {
+      console.log(`[Project] Failed to select: ${(err as Error).message}`);
+    }
   if (!companySelected) {
     console.log("[Login] WARNING: Could not select company — proceeding anyway");
   }

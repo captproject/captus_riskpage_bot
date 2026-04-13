@@ -126,8 +126,7 @@ export async function performAuditLog(input: AuditLogInput): Promise<AuditLogRes
     await page.goto(config.dashboardUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
     await page.waitForTimeout(2000);
 
-    const createBtn = page.getByTestId("btn-create-risk");
-    await createBtn.waitFor({ state: "visible", timeout: 10_000 });
+const createBtn = page.getByTestId("button-add-risk");    await createBtn.waitFor({ state: "visible", timeout: 10_000 });
     await createBtn.click();
     await page.waitForTimeout(1000);
 
