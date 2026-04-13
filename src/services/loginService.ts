@@ -1,7 +1,6 @@
 // ─── Login Service ────────────────────────────────────────────────────────────
 // Shared login logic used by all route handlers.
-// Matches the exact flow from the proven old server.ts:
-// Login → Company Selection → Dashboard navigation
+// Flow: Login → Company "demo" → Project "Test" → Ready
 
 import { BrowserContext, Page } from "playwright";
 import { config } from "../server";
@@ -51,6 +50,27 @@ async function selectCompany(page: Page, companyName = "demo"): Promise<boolean>
     return true;
   } catch (err) {
     console.log(`[Company] Failed to select "${companyName}": ${(err as Error).message}`);
+    return false;
+  }
+}
+
+// ─── Project Selection ───────────────────────────────────────────────────────
+
+async function selectProject(page: Page, projectName = "Test"): Promise<boolean> {
+  try {
+    console.log(`[Project] Selecting project: "${projectName}"`);
+    const projectBtn = page.getByTestId("button-project-selector");
+    await projectBtn.waitFor({ state: "visible", timeout: 10_000 });
+    await projectBtn.click();
+    await page.locator('[role="menuitem"]').first().waitFor({ state: "visible", timeout: 5_000 });
+    const projectOption = page.locator('[role="menuitem"]').filter({ hasText: projectName }).first();
+    await projectOption.waitFor({ state: "visible", timeout: 5_000 });
+    await projectOption.click();
+    await page.waitForTimeout(2_000);
+    console.log(`[Project] Selected "${projectName}" successfully`);
+    return true;
+  } catch (err) {
+    console.log(`[Project] Failed to select "${projectName}": ${(err as Error).message}`);
     return false;
   }
 }
@@ -122,6 +142,7 @@ export async function createContextAndLogin(
         if (btnText?.includes("All Companies")) {
           console.log("[Session] Company not selected — selecting demo");
           await selectCompany(page, "demo");
+          await selectProject(page, "Test");
         }
         console.log(`[Session] Reused session for ${username} — skipped login`);
         return { context, page };
@@ -140,11 +161,17 @@ export async function createContextAndLogin(
     throw new Error("Login failed after all retry attempts");
   }
 
-  // Post-login: select company (critical step — old bot does this)
+  // Post-login: select company
   console.log(`[Login] Post-login URL: ${page.url()}`);
   const companySelected = await selectCompany(page, "demo");
   if (!companySelected) {
     console.log("[Login] WARNING: Could not select company — proceeding anyway");
+  }
+
+  // Post-login: select project
+  const projectSelected = await selectProject(page, "Test");
+  if (!projectSelected) {
+    console.log("[Login] WARNING: Could not select project — proceeding anyway");
   }
 
   // Save session for reuse
