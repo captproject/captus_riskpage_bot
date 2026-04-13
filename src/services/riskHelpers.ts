@@ -161,7 +161,7 @@ export async function fillRiskForm(
   }
 
   if (data.potentialCost) {
-    const costField = page.getByTestId("input-risk-cost");
+const costField = page.getByTestId("input-risk-potential-cost");
     await costField.clear();
     await costField.fill(data.potentialCost);
   }
