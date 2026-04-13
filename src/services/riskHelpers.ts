@@ -154,12 +154,49 @@ export async function fillRiskForm(
     await ownerField.fill(data.owner);
   }
 
-  if (data.dueDate) {
-    const dateField = page.getByTestId("input-risk-due-date");
-    await dateField.clear();
-    await dateField.fill(data.dueDate);
+if (data.dueDate) {
+    console.log(`[Form] Due date: "${data.dueDate}"`);
+    const [yearStr, monthStr, dayStr] = data.dueDate.split("-");
+    const targetYear = parseInt(yearStr);
+    const targetMonth = parseInt(monthStr);
+    const targetDay = parseInt(dayStr).toString();
+    const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+    const targetMonthYear = `${MONTH_NAMES[targetMonth - 1]} ${targetYear}`;
+    const dateButton = page.getByTestId("button-risk-due-date");
+    await dateButton.waitFor({ state: "visible", timeout: 10_000 });
+    await dateButton.click();
+    await page.locator('[role="grid"]').first().waitFor({ state: "visible", timeout: 5_000 });
+    for (let i = 0; i < 24; i++) {
+      const headingText = await page.locator('[class*="rdp"], [id^="react-day-picker"]').first().textContent().catch(() => "");
+      if (headingText?.includes(targetMonthYear)) break;
+      const nextBtn = page.locator('button[name="next-month"]')
+        .or(page.locator('button[aria-label="Go to next month"]'))
+        .or(page.locator('button[aria-label="Go to the next month"]'))
+        .or(page.locator(".rdp-nav button:last-child"));
+      const nextVisible = await nextBtn.first().isVisible().catch(() => false);
+      if (nextVisible) await nextBtn.first().click();
+      else break;
+      await page.waitForTimeout(300);
+    }
+    const dayButton = page.locator('[role="gridcell"] button')
+      .filter({ hasText: new RegExp(`^${targetDay}$`) })
+      .and(page.locator(":not([disabled])"));
+    const dayCount = await dayButton.count();
+    if (dayCount > 0) await dayButton.first().click();
+    else {
+      await page.evaluate((day) => {
+        const cells = document.querySelectorAll('[role="gridcell"]');
+        for (const cell of cells) {
+          const button = cell.querySelector("button");
+          const textEl = button || cell;
+          if (textEl.textContent?.trim() === day && !button?.hasAttribute("disabled")) {
+            (button || (cell as HTMLElement)).click(); return;
+          }
+        }
+      }, targetDay);
+    }
+    await page.locator('[role="grid"]').first().waitFor({ state: "hidden", timeout: 3_000 }).catch(() => {});
   }
-
   if (data.potentialCost) {
 const costField = page.getByTestId("input-risk-potential-cost");
     await costField.clear();
