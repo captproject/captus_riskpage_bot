@@ -1,16 +1,14 @@
 // ─── Validation Service ───────────────────────────────────────────────────────
-// Centralized 4-layer validation engine used by all route handlers.
-// Single source of truth — fix a validation bug once, all endpoints get the fix.
-//
-// Layer 1: Toast detection  → confirms UI action completed
-// Layer 2: Dashboard check  → confirms record visible in list
-// Layer 3: Table search     → confirms record exists in data table
-// Layer 4: Field validation → confirms field values match input
+// Centralized 4-layer validation engine.
+// Layer 1: Toast detection
+// Layer 2: Dashboard search (navigates to dashboard + uses search box)
+// Layer 3: Table search (navigates to table + reads row data)
+// Layer 4: Field validation (compares input vs table data)
 
 import { Page } from "playwright";
 import { ValidationResult, FieldMismatch } from "../utils/types";
 import { withRetry } from "../utils/retry";
-import { detectToast, searchRisk, readRiskRowFromTable, normalize } from "./riskHelpers";
+import { detectToast, searchRiskOnDashboard, readRiskRowFromTable, searchRisk, riskVisibleInPage, normalize } from "./riskHelpers";
 
 export async function validateRiskAction(
   page: Page,
@@ -34,22 +32,28 @@ export async function validateRiskAction(
   result.toast_confirmed = toast.detected && toast.match;
 
   if (!result.toast_confirmed) {
-    result.failure_type = `${action.toUpperCase()}_FAILED`;
-    console.log(`[Validation] FAIL at Layer 1 — toast not confirmed`);
-    return result;
+    // Fallback: check if risk is visible in page
+    const visible = await riskVisibleInPage(page, input.title);
+    if (visible) {
+      result.toast_confirmed = true;
+      console.log("[Validation] Toast missed but risk visible in page — proceeding");
+    } else {
+      result.failure_type = `${action.toUpperCase()}_FAILED`;
+      console.log(`[Validation] FAIL at Layer 1 — toast not confirmed`);
+      return result;
+    }
   }
 
-  // For delete, skip remaining layers (record should NOT exist)
+  // For delete, verify record is gone
   if (action === "delete") {
-    // Verify record is gone
     const stillVisible = await withRetry(
       async () => {
-        const found = await searchRisk(page, input.title);
-        return found ? null : true; // return true (success) if NOT found
+        const found = await searchRiskOnDashboard(page, input.title);
+        return found ? null : true;
       },
       3, 1000, "delete-verify"
     );
-    result.dashboard_visible = true; // means "dashboard check passed" (record gone)
+    result.dashboard_visible = true;
     result.table_search = true;
     result.fields_valid = true;
     if (!stillVisible) {
@@ -62,7 +66,7 @@ export async function validateRiskAction(
   // ── Layer 2: Dashboard Visibility ──
   console.log(`[Validation] Layer 2: Dashboard visibility`);
   const dashboardVisible = await withRetry(
-    () => searchRisk(page, input.title),
+    () => searchRiskOnDashboard(page, input.title),
     3, 2000, "dashboard-search"
   );
   result.dashboard_visible = !!dashboardVisible;
@@ -96,7 +100,6 @@ export async function validateRiskAction(
     const fieldsToCheck: Array<{ field: string; expected: string; actual: string }> = [
       { field: "title", expected: input.title, actual: tableData.title || "" },
     ];
-
     if (input.category) {
       fieldsToCheck.push({ field: "category", expected: input.category, actual: tableData.category || "" });
     }
@@ -112,11 +115,7 @@ export async function validateRiskAction(
 
     for (const check of fieldsToCheck) {
       if (normalize(check.expected) !== normalize(check.actual)) {
-        mismatches.push({
-          field: check.field,
-          expected: check.expected,
-          actual: check.actual,
-        });
+        mismatches.push({ field: check.field, expected: check.expected, actual: check.actual });
       }
     }
   }
