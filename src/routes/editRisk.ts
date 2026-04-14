@@ -3,7 +3,7 @@ import { BrowserContext } from "playwright";
 import { EditRiskInput, RiskResult } from "../utils/types";
 import { config } from "../server";
 import { createContextAndLogin } from "../services/loginService";
-import { fillRiskForm, searchRisk, clickFirstEditButton, detectToast, riskVisibleInPage } from "../services/riskHelpers";
+import { fillRiskForm, searchRisk, clickFirstEditButton, riskVisibleInPage } from "../services/riskHelpers";
 import { validateRiskAction } from "../services/validationService";
 import { safeClose } from "../services/browserManager";
 import { captureFailure, uploadScreenshot } from "../utils/screenshot";
@@ -13,7 +13,7 @@ export async function performEditRisk(input: EditRiskInput): Promise<RiskResult>
   const editedTitle = input.newTitle || input.searchTitle;
   const result: RiskResult = {
     status: "error", message: "", username: input.username, riskTitle: editedTitle,
-    assertion: { expected: "All validations pass", actual: null, match: false },
+    assertion: { expected: "Risk updated successfully", actual: null, match: false },
     checks: { toast_confirmed: false, dashboard_visible: false, table_search: false, fields_valid: false },
     failure_type: null, field_mismatches: [], table_data: null, screenshots: {},
   };
@@ -54,14 +54,14 @@ export async function performEditRisk(input: EditRiskInput): Promise<RiskResult>
     await saveBtn.click();
     console.log("[Edit] Form submitted — starting validation");
 
-    // Centralized 4-layer validation
+    // Centralized 4-layer validation with specific toast message
     const validation = await validateRiskAction(page, {
       title: editedTitle,
       category: input.newCategory,
       status: input.newStatus,
       owner: input.newOwner,
       potentialCost: input.newPotentialCost,
-    }, "edit");
+    }, "edit", "Risk updated successfully");
 
     result.checks = {
       toast_confirmed: validation.toast_confirmed,
@@ -75,12 +75,12 @@ export async function performEditRisk(input: EditRiskInput): Promise<RiskResult>
 
     if (!validation.failure_type) {
       result.status = "success";
-      result.message = "Risk edited — all validations passed";
-      result.assertion = { expected: "All validations pass", actual: "All passed", match: true };
+      result.message = "Risk updated successfully";
+      result.assertion = { expected: "Risk updated successfully", actual: "Risk updated successfully", match: true };
     } else {
       result.status = "failed";
       result.message = `Risk edit validation failed: ${validation.failure_type}`;
-      result.assertion = { expected: "All validations pass", actual: validation.failure_type, match: false };
+      result.assertion = { expected: "Risk updated successfully", actual: validation.failure_type, match: false };
       result.screenshots.failure = await captureFailure(context, "edit_risk_fail");
     }
 

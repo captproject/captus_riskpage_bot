@@ -3,7 +3,7 @@ import { BrowserContext } from "playwright";
 import { RiskInput, RiskResult } from "../utils/types";
 import { config } from "../server";
 import { createContextAndLogin } from "../services/loginService";
-import { fillRiskForm, detectToast, riskVisibleInPage } from "../services/riskHelpers";
+import { fillRiskForm, riskVisibleInPage } from "../services/riskHelpers";
 import { validateRiskAction } from "../services/validationService";
 import { safeClose } from "../services/browserManager";
 import { captureFailure } from "../utils/screenshot";
@@ -12,7 +12,7 @@ export async function performCreateRisk(input: RiskInput): Promise<RiskResult> {
   let context: BrowserContext | null = null;
   const result: RiskResult = {
     status: "error", message: "", username: input.username, riskTitle: input.title,
-    assertion: { expected: "All validations pass", actual: null, match: false },
+    assertion: { expected: "Risk created successfully", actual: null, match: false },
     checks: { toast_confirmed: false, dashboard_visible: false, table_search: false, fields_valid: false },
     failure_type: null, field_mismatches: [], table_data: null, screenshots: {},
   };
@@ -48,8 +48,8 @@ export async function performCreateRisk(input: RiskInput): Promise<RiskResult> {
     await saveBtn.click();
     console.log("[Create] Form submitted — starting validation");
 
-    // Centralized 4-layer validation
-    const validation = await validateRiskAction(page, input, "create");
+    // Centralized 4-layer validation with specific toast message
+    const validation = await validateRiskAction(page, input, "create", "Risk created successfully");
 
     result.checks = {
       toast_confirmed: validation.toast_confirmed,
@@ -63,12 +63,12 @@ export async function performCreateRisk(input: RiskInput): Promise<RiskResult> {
 
     if (!validation.failure_type) {
       result.status = "success";
-      result.message = "Risk created — all validations passed";
-      result.assertion = { expected: "All validations pass", actual: "All passed", match: true };
+      result.message = "Risk created successfully";
+      result.assertion = { expected: "Risk created successfully", actual: "Risk created successfully", match: true };
     } else {
       result.status = "failed";
       result.message = `Risk create validation failed: ${validation.failure_type}`;
-      result.assertion = { expected: "All validations pass", actual: validation.failure_type, match: false };
+      result.assertion = { expected: "Risk created successfully", actual: validation.failure_type, match: false };
       result.screenshots.failure = await captureFailure(context, "create_risk_fail");
     }
 
