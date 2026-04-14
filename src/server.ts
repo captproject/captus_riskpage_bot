@@ -202,8 +202,8 @@ app.post("/filter-risks", authMiddleware, async (req: Request, res: Response) =>
 // POST /score-matrix
 app.post("/score-matrix", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
-  if (!input.username || !input.password || !input.title || !input.expectedScore) {
-    res.status(400).json({ status: "error", message: "Missing: username, password, title, expectedScore" });
+if (!input.username || !input.password || !input.impact || !input.likelihood || input.expectedScore === undefined) {
+      res.status(400).json({ status: "error", message: "Missing: username, password, title, expectedScore" });
     return;
   }
   try {
