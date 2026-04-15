@@ -15,7 +15,9 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.0",
-    "typescript": "^5.3.3",
-    "ts-node": "^10.9.2"
+    "allure-commandline": "^2.38.1",
+    "allure-playwright": "^3.7.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
   }
 }
