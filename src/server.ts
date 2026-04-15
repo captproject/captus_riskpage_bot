@@ -1,6 +1,5 @@
 // ─── Captus Risk Bot — Modular Server ─────────────────────────────────────────
 // Slim entry point: config, middleware, route registration, lifecycle.
-// All logic lives in /routes, /services, and /utils.
 // Allure reporting integrated — every test result is recorded for the report.
 
 import express, { Request, Response, NextFunction } from "express";
@@ -15,7 +14,7 @@ import {
 import { withTimeout } from "./utils/retry";
 import { saveTestResult } from "./services/supabaseLogger";
 import { recordTestResult } from "./services/allureReporter";
-import { handleGenerateReport, handleServeReport, handleReportStats, handleClearResults } from "./services/allureRoutes";
+import { allureRouter } from "./services/allureRoutes";
 
 // Route handlers
 import { performCreateRisk } from "./routes/createRisk";
@@ -55,6 +54,10 @@ function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   }
   next();
 }
+
+// ─── Allure Report Routes (mounted before auth-protected test routes) ────────
+
+app.use("/", allureRouter);
 
 // ─── Test Routes (with Allure recording) ─────────────────────────────────────
 
@@ -281,14 +284,6 @@ app.post("/audit-log", authMiddleware, async (req: Request, res: Response) => {
     res.status(500).json({ status: "error", message: (err as Error).message });
   }
 });
-
-// ─── Allure Report Routes ────────────────────────────────────────────────────
-
-app.post("/generate-report", authMiddleware, handleGenerateReport);
-app.get("/report", handleServeReport);
-app.get("/report/*", handleServeReport);
-app.get("/report-stats", handleReportStats);
-app.post("/clear-results", authMiddleware, handleClearResults);
 
 // ─── Utility Routes ──────────────────────────────────────────────────────────
 
