@@ -1,22 +1,17 @@
-// ─── Captus Risk Bot — Modular Server ─────────────────────────────────────────
-// Slim entry point: config, middleware, route registration, lifecycle.
-// Allure reporting integrated — every test result is recorded for the report.
+// ─── Captus Risk Bot — Modular Server v2.1 ────────────────────────────────────
+// Allure reporting with assertions, checks, table_data, field_mismatches
 
 import express, { Request, Response, NextFunction } from "express";
 import { Config } from "./utils/types";
 import {
-  executionQueue,
-  closeBrowser,
-  invalidateSession,
-  isBrowserConnected,
-  getCachedSessionUsername,
+  executionQueue, closeBrowser, invalidateSession,
+  isBrowserConnected, getCachedSessionUsername,
 } from "./services/browserManager";
 import { withTimeout } from "./utils/retry";
 import { saveTestResult } from "./services/supabaseLogger";
 import { recordTestResult } from "./services/allureReporter";
 import { allureRouter } from "./services/allureRoutes";
 
-// Route handlers
 import { performCreateRisk } from "./routes/createRisk";
 import { performEditRisk } from "./routes/editRisk";
 import { performDeleteRisk } from "./routes/deleteRisk";
@@ -24,8 +19,6 @@ import { performStatusWorkflow } from "./routes/statusWorkflow";
 import { performFilterRisks } from "./routes/filterRisk";
 import { performScoreMatrix } from "./routes/scoreMatrix";
 import { performAuditLog } from "./routes/auditLog";
-
-// ─── Config (exported for use by services) ───────────────────────────────────
 
 export const config: Config = {
   loginUrl: process.env.LOGIN_URL || "https://captus.replit.app/login",
@@ -40,33 +33,25 @@ export const config: Config = {
   executionTimeout: 180_000,
 };
 
-// ─── Express App ─────────────────────────────────────────────────────────────
-
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-// Auth middleware
 function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (!config.apiKey) { next(); return; }
   if (req.headers["x-api-key"] !== config.apiKey) {
-    res.status(401).json({ status: "error", message: "Unauthorized" });
-    return;
+    res.status(401).json({ status: "error", message: "Unauthorized" }); return;
   }
   next();
 }
 
-// ─── Allure Report Routes (mounted before auth-protected test routes) ────────
-
+// Allure routes (no auth needed for viewing report)
 app.use("/", allureRouter);
 
-// ─── Test Routes (with Allure recording) ─────────────────────────────────────
-
-// POST /create-risk
+// ─── POST /create-risk ───────────────────────────────────────────────────────
 app.post("/create-risk", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
   if (!input.username || !input.password || !input.title) {
-    res.status(400).json({ status: "error", message: "Missing: username, password, title" });
-    return;
+    res.status(400).json({ status: "error", message: "Missing: username, password, title" }); return;
   }
   const startTime = Date.now();
   try {
@@ -85,30 +70,26 @@ app.post("/create-risk", authMiddleware, async (req: Request, res: Response) => 
       status: result.status, username: result.username, risk_title: result.riskTitle,
       message: result.message, assertion_expected: "Risk created successfully",
       assertion_actual: result.failure_type || "Risk created successfully",
-      assertion_match: !result.failure_type,
-      screenshot_failure: result.screenshots.failure || null,
-    }, {
-      failure_type: result.failure_type, checks: result.checks,
-      field_mismatches: result.field_mismatches, table_data: result.table_data,
+      assertion_match: !result.failure_type, screenshot_failure: result.screenshots.failure || null,
+    }, { failure_type: result.failure_type, checks: result.checks, field_mismatches: result.field_mismatches, table_data: result.table_data });
+    recordTestResult("TC_Create_Risk", "CRUD Tests", result.status, result.message, startTime, result.checks, result.screenshots.failure, {
+      assertion_expected: "Risk created successfully", assertion_actual: result.failure_type || "Risk created successfully",
+      failure_type: result.failure_type, field_mismatches: result.field_mismatches, table_data: result.table_data,
+      risk_title: result.riskTitle, username: result.username,
     });
-    recordTestResult("TC_Create_Risk", "CRUD Tests", result.status, result.message, startTime, result.checks, result.screenshots.failure);
     res.status(result.status === "error" ? 500 : 200).json(result);
   } catch (err) {
-    await saveTestResult("TC_Create_Risk", {
-      status: "error", username: input.username, risk_title: input.title,
-      message: (err as Error).message, assertion_match: false,
-    }, { failure_type: "EXECUTION_ERROR" });
-    recordTestResult("TC_Create_Risk", "CRUD Tests", "error", (err as Error).message, startTime);
+    await saveTestResult("TC_Create_Risk", { status: "error", username: input.username, risk_title: input.title, message: (err as Error).message, assertion_match: false }, { failure_type: "EXECUTION_ERROR" });
+    recordTestResult("TC_Create_Risk", "CRUD Tests", "error", (err as Error).message, startTime, undefined, undefined, { assertion_expected: "Risk created successfully", assertion_actual: (err as Error).message, failure_type: "EXECUTION_ERROR", username: input.username, risk_title: input.title });
     res.status(500).json({ status: "error", message: (err as Error).message });
   }
 });
 
-// POST /edit-risk
+// ─── POST /edit-risk ─────────────────────────────────────────────────────────
 app.post("/edit-risk", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
   if (!input.username || !input.password || !input.searchTitle) {
-    res.status(400).json({ status: "error", message: "Missing: username, password, searchTitle" });
-    return;
+    res.status(400).json({ status: "error", message: "Missing: username, password, searchTitle" }); return;
   }
   const startTime = Date.now();
   try {
@@ -119,29 +100,26 @@ app.post("/edit-risk", authMiddleware, async (req: Request, res: Response) => {
       status: result.status, username: result.username, risk_title: result.riskTitle,
       message: result.message, assertion_expected: "Risk updated successfully",
       assertion_actual: result.failure_type || "Risk updated successfully",
-      assertion_match: !result.failure_type,
-      screenshot_failure: result.screenshots.failure || null,
-    }, {
-      failure_type: result.failure_type, checks: result.checks,
-      field_mismatches: result.field_mismatches, table_data: result.table_data,
+      assertion_match: !result.failure_type, screenshot_failure: result.screenshots.failure || null,
+    }, { failure_type: result.failure_type, checks: result.checks, field_mismatches: result.field_mismatches, table_data: result.table_data });
+    recordTestResult("TC_Edit_Risk", "CRUD Tests", result.status, result.message, startTime, result.checks, result.screenshots.failure, {
+      assertion_expected: "Risk updated successfully", assertion_actual: result.failure_type || "Risk updated successfully",
+      failure_type: result.failure_type, field_mismatches: result.field_mismatches, table_data: result.table_data,
+      risk_title: result.riskTitle, username: result.username,
     });
-    recordTestResult("TC_Edit_Risk", "CRUD Tests", result.status, result.message, startTime, result.checks, result.screenshots.failure);
     res.status(result.status === "error" ? 500 : 200).json(result);
   } catch (err) {
-    await saveTestResult("TC_Edit_Risk", {
-      status: "error", username: input.username, message: (err as Error).message, assertion_match: false,
-    }, { failure_type: "EXECUTION_ERROR" });
-    recordTestResult("TC_Edit_Risk", "CRUD Tests", "error", (err as Error).message, startTime);
+    await saveTestResult("TC_Edit_Risk", { status: "error", username: input.username, message: (err as Error).message, assertion_match: false }, { failure_type: "EXECUTION_ERROR" });
+    recordTestResult("TC_Edit_Risk", "CRUD Tests", "error", (err as Error).message, startTime, undefined, undefined, { assertion_expected: "Risk updated successfully", assertion_actual: (err as Error).message, failure_type: "EXECUTION_ERROR", username: input.username });
     res.status(500).json({ status: "error", message: (err as Error).message });
   }
 });
 
-// POST /delete-risk
+// ─── POST /delete-risk ───────────────────────────────────────────────────────
 app.post("/delete-risk", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
   if (!input.username || !input.password || !input.searchTitle) {
-    res.status(400).json({ status: "error", message: "Missing: username, password, searchTitle" });
-    return;
+    res.status(400).json({ status: "error", message: "Missing: username, password, searchTitle" }); return;
   }
   const startTime = Date.now();
   try {
@@ -150,23 +128,24 @@ app.post("/delete-risk", authMiddleware, async (req: Request, res: Response) => 
     );
     await saveTestResult("TC_Delete_Risk", {
       status: result.status, username: result.username, risk_title: result.riskTitle,
-      message: result.message, assertion_match: !result.failure_type,
-      screenshot_failure: result.screenshots.failure || null,
+      message: result.message, assertion_match: !result.failure_type, screenshot_failure: result.screenshots.failure || null,
     }, { failure_type: result.failure_type, checks: result.checks });
-    recordTestResult("TC_Delete_Risk", "CRUD Tests", result.status, result.message, startTime, result.checks, result.screenshots.failure);
+    recordTestResult("TC_Delete_Risk", "CRUD Tests", result.status, result.message, startTime, result.checks, result.screenshots.failure, {
+      assertion_expected: "Risk deleted successfully", assertion_actual: result.failure_type || "Risk deleted successfully",
+      failure_type: result.failure_type, risk_title: result.riskTitle, username: result.username,
+    });
     res.status(result.status === "error" ? 500 : 200).json(result);
   } catch (err) {
-    recordTestResult("TC_Delete_Risk", "CRUD Tests", "error", (err as Error).message, startTime);
+    recordTestResult("TC_Delete_Risk", "CRUD Tests", "error", (err as Error).message, startTime, undefined, undefined, { assertion_expected: "Risk deleted successfully", assertion_actual: (err as Error).message, failure_type: "EXECUTION_ERROR" });
     res.status(500).json({ status: "error", message: (err as Error).message });
   }
 });
 
-// POST /risk-status-workflow
+// ─── POST /risk-status-workflow ──────────────────────────────────────────────
 app.post("/risk-status-workflow", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
   if (!input.username || !input.password || !input.title) {
-    res.status(400).json({ status: "error", message: "Missing: username, password, title" });
-    return;
+    res.status(400).json({ status: "error", message: "Missing: username, password, title" }); return;
   }
   const startTime = Date.now();
   try {
@@ -187,7 +166,10 @@ app.post("/risk-status-workflow", authMiddleware, async (req: Request, res: Resp
       assertion_actual: result.assertion.actual, assertion_match: result.assertion.match,
       screenshot_failure: result.screenshots.failure || null,
     }, { steps: result.steps, versions_created: result.versions_created });
-    recordTestResult("TC_Risk_Status_Workflow", "Workflow Tests", result.status, result.message, startTime, undefined, result.screenshots.failure);
+    recordTestResult("TC_Risk_Status_Workflow", "Workflow Tests", result.status, result.message, startTime, undefined, result.screenshots.failure, {
+      assertion_expected: result.assertion.expected, assertion_actual: result.assertion.actual,
+      risk_title: result.riskTitle, username: input.username,
+    });
     res.status(result.status === "error" ? 500 : 200).json(result);
   } catch (err) {
     recordTestResult("TC_Risk_Status_Workflow", "Workflow Tests", "error", (err as Error).message, startTime);
@@ -195,12 +177,11 @@ app.post("/risk-status-workflow", authMiddleware, async (req: Request, res: Resp
   }
 });
 
-// POST /filter-risks
+// ─── POST /filter-risks ──────────────────────────────────────────────────────
 app.post("/filter-risks", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
   if (!input.username || !input.password) {
-    res.status(400).json({ status: "error", message: "Missing: username, password" });
-    return;
+    res.status(400).json({ status: "error", message: "Missing: username, password" }); return;
   }
   const startTime = Date.now();
   try {
@@ -208,11 +189,12 @@ app.post("/filter-risks", authMiddleware, async (req: Request, res: Response) =>
       withTimeout(() => performFilterRisks(input), config.executionTimeout, "filter-risks")
     );
     await saveTestResult("TC_Filter_Risk", {
-      status: result.status, username: result.username,
-      message: result.message, assertion_match: result.validation.all_match,
-      screenshot_failure: result.screenshots.failure || null,
+      status: result.status, username: result.username, message: result.message,
+      assertion_match: result.validation.all_match, screenshot_failure: result.screenshots.failure || null,
     }, { filters: result.filters_applied, rows_found: result.rows_found, validation: result.validation });
-    recordTestResult("TC_Filter_Risk", "Validation Tests", result.status, result.message, startTime, undefined, result.screenshots.failure);
+    recordTestResult("TC_Filter_Risk", "Validation Tests", result.status, result.message, startTime, undefined, result.screenshots.failure, {
+      assertion_expected: "All rows match filters", assertion_actual: result.message, username: result.username,
+    });
     res.status(result.status === "error" ? 500 : 200).json(result);
   } catch (err) {
     recordTestResult("TC_Filter_Risk", "Validation Tests", "error", (err as Error).message, startTime);
@@ -220,12 +202,11 @@ app.post("/filter-risks", authMiddleware, async (req: Request, res: Response) =>
   }
 });
 
-// POST /score-matrix
+// ─── POST /score-matrix ──────────────────────────────────────────────────────
 app.post("/score-matrix", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
   if (!input.username || !input.password || !input.impact || !input.likelihood || input.expectedScore === undefined) {
-    res.status(400).json({ status: "error", message: "Missing: username, password, impact, likelihood, expectedScore" });
-    return;
+    res.status(400).json({ status: "error", message: "Missing: username, password, impact, likelihood, expectedScore" }); return;
   }
   const startTime = Date.now();
   try {
@@ -246,7 +227,10 @@ app.post("/score-matrix", authMiddleware, async (req: Request, res: Response) =>
       assertion_actual: `Score = ${result.actual_score}`, assertion_match: result.score_match,
       screenshot_failure: result.screenshots.failure || null,
     }, { impact: result.impact, likelihood: result.likelihood, score_match: result.score_match, cleaned_up: result.cleaned_up });
-    recordTestResult(`TC_Score_Matrix (${result.impact} × ${result.likelihood})`, "Score Matrix Tests", result.status, result.message, startTime, undefined, result.screenshots.failure);
+    recordTestResult(`TC_Score_Matrix (${result.impact} × ${result.likelihood})`, "Score Matrix Tests", result.status, result.message, startTime, undefined, result.screenshots.failure, {
+      assertion_expected: `Score = ${result.expected_score}`, assertion_actual: `Score = ${result.actual_score}`,
+      risk_title: result.risk_title, username: result.username,
+    });
     res.status(result.status === "error" ? 500 : 200).json(result);
   } catch (err) {
     recordTestResult("TC_Score_Matrix", "Score Matrix Tests", "error", (err as Error).message, startTime);
@@ -254,12 +238,11 @@ app.post("/score-matrix", authMiddleware, async (req: Request, res: Response) =>
   }
 });
 
-// POST /audit-log
+// ─── POST /audit-log ─────────────────────────────────────────────────────────
 app.post("/audit-log", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
   if (!input.username || !input.password) {
-    res.status(400).json({ status: "error", message: "Missing: username, password" });
-    return;
+    res.status(400).json({ status: "error", message: "Missing: username, password" }); return;
   }
   const startTime = Date.now();
   try {
@@ -271,73 +254,50 @@ app.post("/audit-log", authMiddleware, async (req: Request, res: Response) => {
       message: result.steps_summary || result.message,
       assertion_expected: `All ${result.total_steps} audit entries verified`,
       assertion_actual: `${result.passed}/${result.total_steps} passed`,
-      assertion_match: result.failed === 0,
-      screenshot_failure: result.screenshots.failure || null,
+      assertion_match: result.failed === 0, screenshot_failure: result.screenshots.failure || null,
     }, { total_steps: result.total_steps, passed: result.passed, failed: result.failed, steps: result.steps });
-    recordTestResult("TC_Audit_Log", "Audit Tests", result.status, result.steps_summary || result.message, startTime, undefined, result.screenshots.failure);
+    recordTestResult("TC_Audit_Log", "Audit Tests", result.status, result.steps_summary || result.message, startTime, undefined, result.screenshots.failure, {
+      assertion_expected: `All ${result.total_steps} audit entries verified`,
+      assertion_actual: `${result.passed}/${result.total_steps} passed`,
+      risk_title: result.risk_title, username: result.username,
+    });
     res.status(result.status === "error" ? 500 : 200).json(result);
   } catch (err) {
-    await saveTestResult("TC_Audit_Log", {
-      status: "error", username: input.username, message: (err as Error).message, assertion_match: false,
-    }, {});
-    recordTestResult("TC_Audit_Log", "Audit Tests", "error", (err as Error).message, startTime);
+    await saveTestResult("TC_Audit_Log", { status: "error", username: input.username, message: (err as Error).message, assertion_match: false }, {});
+    recordTestResult("TC_Audit_Log", "Audit Tests", "error", (err as Error).message, startTime, undefined, undefined, { assertion_expected: "All 6 audit entries verified", assertion_actual: (err as Error).message, failure_type: "EXECUTION_ERROR" });
     res.status(500).json({ status: "error", message: (err as Error).message });
   }
 });
 
 // ─── Utility Routes ──────────────────────────────────────────────────────────
 
-// POST /reset-browser
 app.post("/reset-browser", authMiddleware, async (_req: Request, res: Response) => {
-  await closeBrowser();
-  invalidateSession();
-  if (global.gc) { global.gc(); console.log("[Reset] Forced garbage collection"); }
-  res.json({ status: "ok", message: "Browser closed, session cleared, memory released", timestamp: new Date().toISOString() });
+  await closeBrowser(); invalidateSession();
+  if (global.gc) { global.gc(); }
+  res.json({ status: "ok", message: "Browser closed, session cleared", timestamp: new Date().toISOString() });
 });
 
-// GET /health
 app.get("/health", (_req: Request, res: Response) => {
   const mem = process.memoryUsage();
   res.json({
-    status: "running",
-    service: "captus-risk-bot",
-    version: "2.1.0-allure",
-    endpoints: [
-      "/create-risk", "/edit-risk", "/delete-risk",
-      "/risk-status-workflow", "/filter-risks", "/score-matrix",
-      "/audit-log", "/reset-browser",
-      "/generate-report", "/report", "/report-stats", "/clear-results",
-    ],
-    browserConnected: isBrowserConnected(),
-    sessionCached: getCachedSessionUsername(),
+    status: "running", service: "captus-risk-bot", version: "2.1.0-allure",
+    endpoints: ["/create-risk", "/edit-risk", "/delete-risk", "/risk-status-workflow", "/filter-risks", "/score-matrix", "/audit-log", "/reset-browser", "/generate-report", "/report", "/report-stats", "/clear-results"],
+    browserConnected: isBrowserConnected(), sessionCached: getCachedSessionUsername(),
     queue: { running: executionQueue.isRunning, pending: executionQueue.pendingCount },
-    memory: {
-      rss: `${Math.round(mem.rss / 1024 / 1024)} MB`,
-      heapUsed: `${Math.round(mem.heapUsed / 1024 / 1024)} MB`,
-    },
+    memory: { rss: `${Math.round(mem.rss / 1024 / 1024)} MB`, heapUsed: `${Math.round(mem.heapUsed / 1024 / 1024)} MB` },
     timestamp: new Date().toISOString(),
   });
 });
-
-// ─── Start & Shutdown ────────────────────────────────────────────────────────
 
 const server = app.listen(config.port, "0.0.0.0", () => {
   console.log(`Risk Bot v2.1 (modular + allure) running on port ${config.port}`);
   console.log(`Dashboard: ${config.dashboardUrl}`);
   console.log(`Table:     ${config.tableUrl}`);
-  console.log(`Audit:     ${config.auditUrl}`);
-  console.log(`Auth:      ${config.apiKey ? "ENABLED" : "DISABLED"}`);
-  console.log(`Supabase:  ${config.supabaseUrl ? "ENABLED" : "DISABLED"}`);
   console.log(`Allure:    ENABLED (/report, /generate-report)`);
-  console.log(`Queue:     ENABLED (single concurrency)`);
 });
 
 async function shutdown(): Promise<void> {
-  console.log("\nShutting down...");
-  server.close();
-  await closeBrowser();
-  process.exit(0);
+  console.log("\nShutting down..."); server.close(); await closeBrowser(); process.exit(0);
 }
-
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
