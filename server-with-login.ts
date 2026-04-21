@@ -1,5 +1,5 @@
-// ─── Captus Risk Bot — Modular Server v2.1 ────────────────────────────────────
-// Allure reporting with assertions, checks, table_data, field_mismatches
+// ─── Captus Risk Bot — Modular Server v2.2 ────────────────────────────────────
+// Includes: All risk page routes + login-v2 route + Allure reporting
 
 import express, { Request, Response, NextFunction } from "express";
 import { Config } from "./utils/types";
@@ -19,6 +19,7 @@ import { performStatusWorkflow } from "./routes/statusWorkflow";
 import { performFilterRisks } from "./routes/filterRisk";
 import { performScoreMatrix } from "./routes/scoreMatrix";
 import { performAuditLog } from "./routes/auditLog";
+import { performLoginBot } from "./routes/loginBot";
 
 export const config: Config = {
   loginUrl: process.env.LOGIN_URL || "https://captus.replit.app/login",
@@ -44,7 +45,6 @@ function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
-// Allure routes (no auth needed for viewing report)
 app.use("/", allureRouter);
 
 // ─── POST /create-risk ───────────────────────────────────────────────────────
@@ -269,6 +269,47 @@ app.post("/audit-log", authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /login-v2 ──────────────────────────────────────────────────────────
+// New route for 01B_Login_Bot workflow
+app.post("/login-v2", authMiddleware, async (req: Request, res: Response) => {
+  const input = req.body;
+  if (!input.username || !input.password) {
+    res.status(400).json({ status: "error", message: "Missing: username, password" }); return;
+  }
+  const startTime = Date.now();
+  try {
+    const result = await executionQueue.add(() =>
+      withTimeout(() => performLoginBot(input), config.executionTimeout, "login-v2")
+    );
+    await saveTestResult("01B_Login_Bot", {
+      status: result.status, username: result.username,
+      message: result.message,
+      assertion_expected: result.status_expected,
+      assertion_actual: result.status_actual,
+      assertion_match: result.assertion_match === "pass",
+      screenshot_failure: result.screenshot_url,
+    }, {
+      currentUrl: result.currentUrl,
+      pageTitle: result.pageTitle,
+      landing_page: result.landing_page,
+      logo_validated: result.logo_validated,
+    });
+    recordTestResult("01B_Login_Bot", "Login Tests", result.status, result.message, startTime, undefined, result.screenshot_url, {
+      assertion_expected: result.status_expected,
+      assertion_actual: result.status_actual,
+      username: result.username,
+    });
+    res.status(result.status === "error" ? 500 : 200).json(result);
+  } catch (err) {
+    recordTestResult("01B_Login_Bot", "Login Tests", "error", (err as Error).message, startTime, undefined, undefined, {
+      assertion_expected: "Login successful",
+      assertion_actual: (err as Error).message,
+      username: input.username,
+    });
+    res.status(500).json({ status: "error", message: (err as Error).message });
+  }
+});
+
 // ─── Utility Routes ──────────────────────────────────────────────────────────
 
 app.post("/reset-browser", authMiddleware, async (_req: Request, res: Response) => {
@@ -280,8 +321,14 @@ app.post("/reset-browser", authMiddleware, async (_req: Request, res: Response) 
 app.get("/health", (_req: Request, res: Response) => {
   const mem = process.memoryUsage();
   res.json({
-    status: "running", service: "captus-risk-bot", version: "2.1.0-allure",
-    endpoints: ["/create-risk", "/edit-risk", "/delete-risk", "/risk-status-workflow", "/filter-risks", "/score-matrix", "/audit-log", "/reset-browser", "/generate-report", "/report", "/report-stats", "/clear-results"],
+    status: "running", service: "captus-risk-bot", version: "2.2.0-allure-login",
+    endpoints: [
+      "/create-risk", "/edit-risk", "/delete-risk",
+      "/risk-status-workflow", "/filter-risks", "/score-matrix",
+      "/audit-log", "/login-v2",
+      "/reset-browser",
+      "/generate-report", "/report", "/report-stats", "/clear-results",
+    ],
     browserConnected: isBrowserConnected(), sessionCached: getCachedSessionUsername(),
     queue: { running: executionQueue.isRunning, pending: executionQueue.pendingCount },
     memory: { rss: `${Math.round(mem.rss / 1024 / 1024)} MB`, heapUsed: `${Math.round(mem.heapUsed / 1024 / 1024)} MB` },
@@ -290,10 +337,11 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 const server = app.listen(config.port, "0.0.0.0", () => {
-  console.log(`Risk Bot v2.1 (modular + allure) running on port ${config.port}`);
+  console.log(`Risk Bot v2.2 (modular + allure + login) running on port ${config.port}`);
   console.log(`Dashboard: ${config.dashboardUrl}`);
-  console.log(`Table:     ${config.tableUrl}`);
+  console.log(`Login:     ${config.loginUrl}`);
   console.log(`Allure:    ENABLED (/report, /generate-report)`);
+  console.log(`LoginBot:  ENABLED (/login-v2)`);
 });
 
 async function shutdown(): Promise<void> {
