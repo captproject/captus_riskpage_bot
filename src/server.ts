@@ -269,7 +269,7 @@ app.post("/audit-log", authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-// ───/login-v2 ROUTE IN src/server.ts ─────────────────────────
+// ─── REPLACE ONLY THE /login-v2 ROUTE IN src/server.ts ─────────────────────────
 
 app.post("/login-v2", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
@@ -289,6 +289,7 @@ app.post("/login-v2", authMiddleware, async (req: Request, res: Response) => {
       assertion_match: result.assertion_match === "pass",
       screenshot_failure: result.screenshot_url,
     }, {
+      id: result.id,
       scenario: result.scenario,
       currentUrl: result.currentUrl,
       pageTitle: result.pageTitle,
@@ -299,15 +300,17 @@ app.post("/login-v2", authMiddleware, async (req: Request, res: Response) => {
     // Allure status based on assertion_match (not raw status)
     const allureStatus = result.assertion_match === "pass" ? "success" : "failed";
     
-    // Use scenario description if available, else fallback to username
+    // Use scenario description as the test name
     const testName = result.scenario 
       ? `01B_Login_Bot — ${result.scenario}` 
       : `01B_Login_Bot — ${result.username}`;
 
+    // Minimal mode: only ID, Scenario, Match in Allure report
     recordTestResult(testName, "Login Tests", allureStatus, result.message, startTime, undefined, result.screenshot_url, {
-      assertion_expected: result.status_expected,
-      assertion_actual: result.status_actual,
+      id: result.id,
+      scenario: result.scenario,
       username: result.username,
+      mode: "minimal",
     });
     res.status(result.status === "error" ? 500 : 200).json(result);
   } catch (err) {
@@ -315,9 +318,10 @@ app.post("/login-v2", authMiddleware, async (req: Request, res: Response) => {
       ? `01B_Login_Bot — ${input.scenario}` 
       : `01B_Login_Bot — ${input.username}`;
     recordTestResult(testName, "Login Tests", "error", (err as Error).message, startTime, undefined, undefined, {
-      assertion_expected: "Login successful",
-      assertion_actual: (err as Error).message,
+      id: input.id,
+      scenario: input.scenario,
       username: input.username,
+      mode: "minimal",
     });
     res.status(500).json({ status: "error", message: (err as Error).message });
   }

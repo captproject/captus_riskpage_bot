@@ -1,22 +1,12 @@
-// ─── Login Bot Route — matches old login-v2 endpoint exactly ──────────────────
-// Used by 01B_Login_Bot n8n workflow.
-// Reads credentials from Supabase SignIn_Task table, attempts login,
-// runs 3 assertions for successful logins, returns structured result.
-//
-// 3 Assertions after successful login:
-//   1. URL: must be /admin/companies
-//   2. Page Title (h1): must be "Company Management"
-//   3. Toast: must contain "Welcome back!" + "logged in successfully"
-//
-// Screenshot captured ONLY when assertion_match = "fail" (unexpected behavior).
+// ─── Login Bot Route — Simplified Allure output ──────────────────────────────
+// Displays only: ID, Scenario Description, Assertion Match in Allure report
 
 import { BrowserContext, Page } from "playwright";
 import { config } from "../server";
 import { getBrowser, closeBrowser } from "../services/browserManager";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-
 export interface LoginBotInput {
+  id?: number | string;
   username: string;
   password: string;
   scenario?: string;
@@ -25,6 +15,7 @@ export interface LoginBotInput {
 export interface LoginBotResult {
   status: "success" | "failed" | "error";
   message: string;
+  id?: number | string;
   username: string;
   scenario?: string;
   currentUrl?: string;
@@ -42,107 +33,66 @@ const ERROR_KEYWORDS = [
   "failed", "denied", "unauthorized", "error",
 ];
 
-// ─── Custom screenshot upload ───────────────────────────────────────────────
-
-async function uploadLoginScreenshot(
-  buffer: Buffer,
-  username: string,
-  status: string
-): Promise<string | null> {
+async function uploadLoginScreenshot(buffer: Buffer, username: string, status: string): Promise<string | null> {
   if (!config.supabaseUrl || !config.supabaseKey) return null;
-
   const sanitizedUsername = username.replace(/[^a-zA-Z0-9]/g, "_");
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const fileName = `${sanitizedUsername}_${status}_${timestamp}.png`;
-
   try {
-    const response = await fetch(
-      `${config.supabaseUrl}/storage/v1/object/screenshots/${fileName}`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${config.supabaseKey}`,
-          "Content-Type": "image/png",
-          "x-upsert": "true",
-        },
-        body: buffer as unknown as BodyInit,
-      }
-    );
-
-    if (response.ok) {
-      return `${config.supabaseUrl}/storage/v1/object/public/screenshots/${fileName}`;
-    }
-    console.error(`[Login] Screenshot upload failed: ${await response.text()}`);
+    const response = await fetch(`${config.supabaseUrl}/storage/v1/object/screenshots/${fileName}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.supabaseKey}`,
+        "Content-Type": "image/png",
+        "x-upsert": "true",
+      },
+      body: buffer as unknown as BodyInit,
+    });
+    if (response.ok) return `${config.supabaseUrl}/storage/v1/object/public/screenshots/${fileName}`;
     return null;
-  } catch (err) {
-    console.error(`[Login] Screenshot upload error: ${(err as Error).message}`);
-    return null;
-  }
+  } catch { return null; }
 }
 
-// ─── Main Login Bot Function ─────────────────────────────────────────────────
-
 export async function performLoginBot(input: LoginBotInput): Promise<LoginBotResult> {
-  const { username, password, scenario } = input;
+  const { id, username, password, scenario } = input;
   let context: BrowserContext | null = null;
 
   try {
-    console.log(`[LoginBot] Starting login attempt for: ${username}${scenario ? ` (${scenario})` : ""}`);
+    console.log(`[LoginBot] Starting: id=${id} user=${username} scenario="${scenario}"`);
     const browser = await getBrowser();
-
-    context = await browser.newContext({
-      viewport: { width: 1280, height: 720 },
-    });
+    context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
     context.setDefaultTimeout(config.navigationTimeout);
-
     const page: Page = await context.newPage();
 
-    // Step 1: Navigate to login page
-    await page.goto(config.loginUrl, {
-      waitUntil: "networkidle",
-      timeout: 60_000,
-    });
-
-    await page.waitForSelector('input[name="email"]', {
-      state: "visible",
-      timeout: 15_000,
-    });
-
+    await page.goto(config.loginUrl, { waitUntil: "networkidle", timeout: 60_000 });
+    await page.waitForSelector('input[name="email"]', { state: "visible", timeout: 15_000 });
     await page.waitForTimeout(5_000);
 
-    // Step 2: Fill email (native value setter for React)
     await page.evaluate((email) => {
       const input = document.querySelector('input[name="email"]') as HTMLInputElement;
       if (input) {
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-          window.HTMLInputElement.prototype, "value"
-        )?.set;
-        if (nativeSetter) nativeSetter.call(input, email);
+        const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        if (s) s.call(input, email);
         input.dispatchEvent(new Event("input", { bubbles: true }));
         input.dispatchEvent(new Event("change", { bubbles: true }));
       }
     }, username);
 
-    // Step 3: Fill password
     await page.evaluate((pass) => {
       const input = document.querySelector('input[name="password"]') as HTMLInputElement;
       if (input) {
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-          window.HTMLInputElement.prototype, "value"
-        )?.set;
-        if (nativeSetter) nativeSetter.call(input, pass);
+        const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        if (s) s.call(input, pass);
         input.dispatchEvent(new Event("input", { bubbles: true }));
         input.dispatchEvent(new Event("change", { bubbles: true }));
       }
     }, password);
 
-    // Step 4: Click login button
     await page.evaluate(() => {
       const btn = document.querySelector('button[data-testid="button-login"]') as HTMLButtonElement;
       if (btn) btn.click();
     });
 
-    // Wait for navigation or stay on login — up to 15 seconds
     await page.waitForURL((url) => !url.pathname.includes("/login"), { timeout: 15_000 }).catch(() => {});
     await page.waitForTimeout(2_000);
 
@@ -157,112 +107,75 @@ export async function performLoginBot(input: LoginBotInput): Promise<LoginBotRes
     let assertionMatch: "pass" | "fail" = "fail";
 
     if (!stillOnLogin) {
-      // LOGIN SUCCEEDED — Run 3 Assertions
-      console.log(`[LoginBot] Login succeeded — running 3 assertions for ${username}`);
-
       const landingPage = new URL(currentUrl).pathname;
       const assertionResults: string[] = [];
       let allPassed = true;
 
-      // Assertion 1: URL Check
       const expectedUrl = "/admin/companies";
-      const actualUrl = landingPage;
-      const urlPass = actualUrl === expectedUrl;
+      const urlPass = landingPage === expectedUrl;
       if (!urlPass) allPassed = false;
-      assertionResults.push(`URL: ${urlPass ? "PASS" : "FAIL"} (expected="${expectedUrl}" actual="${actualUrl}")`);
-      console.log(`[LoginBot] Assertion 1 [URL]: ${urlPass ? "PASS" : "FAIL"}`);
+      assertionResults.push(`URL: ${urlPass ? "PASS" : "FAIL"}`);
 
-      // Assertion 2: Page Title (h1) Check
-      const expectedTitle = "Company Management";
       let actualTitle = "";
       try {
-        const h1Element = page.locator('[data-testid="text-page-title"]');
-        await h1Element.waitFor({ state: "visible", timeout: 10_000 });
-        actualTitle = (await h1Element.textContent())?.trim() || "";
-      } catch {
-        actualTitle = "NOT FOUND";
-      }
-      const titlePass = actualTitle === expectedTitle;
+        const h1 = page.locator('[data-testid="text-page-title"]');
+        await h1.waitFor({ state: "visible", timeout: 10_000 });
+        actualTitle = (await h1.textContent())?.trim() || "";
+      } catch { actualTitle = "NOT FOUND"; }
+      const titlePass = actualTitle === "Company Management";
       if (!titlePass) allPassed = false;
-      assertionResults.push(`Page Title: ${titlePass ? "PASS" : "FAIL"} (expected="${expectedTitle}" actual="${actualTitle}")`);
-      console.log(`[LoginBot] Assertion 2 [Title]: ${titlePass ? "PASS" : "FAIL"}`);
+      assertionResults.push(`Title: ${titlePass ? "PASS" : "FAIL"}`);
 
-      // Assertion 3: Toast Message Check
-      const expectedToast = "Welcome back! You have been logged in successfully.";
       let actualToast = "";
       try {
         const toastLocator = page.locator("text=Welcome back!").first();
         await toastLocator.waitFor({ state: "visible", timeout: 8_000 });
-
-        const toastParent = toastLocator.locator(
-          "xpath=ancestor::*[contains(@class,'toast') or contains(@role,'status') or contains(@class,'notification')]"
-        ).first();
+        const toastParent = toastLocator.locator("xpath=ancestor::*[contains(@class,'toast') or contains(@role,'status') or contains(@class,'notification')]").first();
         try {
           actualToast = (await toastParent.textContent({ timeout: 3_000 }))?.trim() || "";
         } catch {
-          const directParent = toastLocator.locator("..");
-          const parentText = (await directParent.textContent({ timeout: 3_000 }))?.trim() || "";
-          if (parentText.length > actualToast.length) actualToast = parentText;
+          const dp = toastLocator.locator("..");
+          actualToast = (await dp.textContent({ timeout: 3_000 }))?.trim() || "";
           if (actualToast === "Welcome back!" || actualToast.length < 20) {
-            const grandParent = directParent.locator("..");
-            actualToast = (await grandParent.textContent({ timeout: 3_000 }))?.trim() || actualToast;
+            actualToast = (await dp.locator("..").textContent({ timeout: 3_000 }))?.trim() || actualToast;
           }
         }
-      } catch {
-        actualToast = "TOAST NOT FOUND";
-      }
+      } catch { actualToast = "TOAST NOT FOUND"; }
       const toastPass = actualToast.includes("Welcome back!") && actualToast.includes("logged in successfully");
       if (!toastPass) allPassed = false;
-      assertionResults.push(`Toast: ${toastPass ? "PASS" : "FAIL"} (expected="${expectedToast}" actual="${actualToast}")`);
-      console.log(`[LoginBot] Assertion 3 [Toast]: ${toastPass ? "PASS" : "FAIL"}`);
+      assertionResults.push(`Toast: ${toastPass ? "PASS" : "FAIL"}`);
 
       statusExpected = `Welcome back! You have been logged in successfully`;
-      statusActual = allPassed
-        ? `Welcome back! You have been logged in successfully`
-        : assertionResults.filter((r) => r.includes("FAIL")).join(" | ");
+      statusActual = allPassed ? statusExpected : assertionResults.filter((r) => r.includes("FAIL")).join(" | ");
       assertionMatch = allPassed ? "pass" : "fail";
-
       status = allPassed ? "success" : "failed";
-      message = allPassed
-        ? `Login successful — landed on /admin/companies — all 3 assertions passed`
-        : `Login succeeded but assertion(s) failed: ${assertionResults.filter((r) => r.includes("FAIL")).join("; ")}`;
+      message = allPassed ? "Login successful — landed on /admin/companies — all 3 assertions passed" : `Login succeeded but assertion(s) failed: ${assertionResults.filter((r) => r.includes("FAIL")).join("; ")}`;
     } else {
-      // LOGIN FAILED (Invalid credentials or stayed on login page)
       const bodyText = await page.evaluate(() => document.body.innerText);
-      const bodyLower = bodyText.toLowerCase();
-      const detectedError = ERROR_KEYWORDS.find((word) => bodyLower.includes(word));
-
+      const detectedError = ERROR_KEYWORDS.find((w) => bodyText.toLowerCase().includes(w));
       statusExpected = `Login failed\n401: {"message":"Invalid email or password"}`;
-      statusActual = `Login failed\n401: {"message":"Invalid email or password"}`;
-
+      statusActual = statusExpected;
       if (detectedError) {
-        status = "failed";
-        message = `Login failed — invalid`;
-        assertionMatch = "pass"; // Expected failure = assertion pass
+        status = "failed"; message = "Login failed — invalid"; assertionMatch = "pass";
       } else {
-        status = "failed";
-        message = "Login failed — still on login page";
+        status = "failed"; message = "Login failed — still on login page";
         statusActual = "Login failed — still on login page (no error message detected)";
         assertionMatch = "pass";
       }
     }
 
-    // Screenshot ONLY when assertion_match = fail (unexpected behavior)
     let screenshotUrl: string | null = null;
     if (assertionMatch === "fail") {
-      const screenshotBuffer = await page.screenshot({ fullPage: true });
-      await context.close();
-      context = null;
-      screenshotUrl = await uploadLoginScreenshot(screenshotBuffer, username, "assertion_fail");
+      const buffer = await page.screenshot({ fullPage: true });
+      await context.close(); context = null;
+      screenshotUrl = await uploadLoginScreenshot(buffer, username, "assertion_fail");
     } else {
-      await context.close();
-      context = null;
+      await context.close(); context = null;
     }
-
     await closeBrowser();
 
     return {
-      status, message, username, scenario, currentUrl, pageTitle,
+      status, message, id, username, scenario, currentUrl, pageTitle,
       landing_page: stillOnLogin ? undefined : new URL(currentUrl).pathname,
       logo_validated: status === "success",
       status_expected: statusExpected,
@@ -274,15 +187,12 @@ export async function performLoginBot(input: LoginBotInput): Promise<LoginBotRes
     if (context) await context.close().catch(() => {});
     await closeBrowser();
     return {
-      status: "error",
-      message: (error as Error).message,
-      username,
-      scenario,
+      status: "error", message: (error as Error).message,
+      id, username, scenario,
       logo_validated: false,
       status_expected: "Login successful",
       status_actual: `ERROR: ${(error as Error).message}`,
-      assertion_match: "fail",
-      screenshot_url: null,
+      assertion_match: "fail", screenshot_url: null,
     };
   }
 }
