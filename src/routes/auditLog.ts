@@ -25,11 +25,27 @@ async function navigateToAuditTrail(page: Page): Promise<void> {
 
 async function applyAuditActionFilter(page: Page, actionName: string): Promise<void> {
   try {
+    // Step 1: Click the "Filters" toggle button to expand filter panel
+    const filterToggle = page.getByTestId("button-toggle-filters");
+    const toggleVisible = await filterToggle.isVisible().catch(() => false);
+    if (toggleVisible) {
+      // Check if panel is already open by looking for the action dropdown
+      const dropdownVisible = await page.getByTestId("select-filter-action").isVisible().catch(() => false);
+      if (!dropdownVisible) {
+        await filterToggle.click();
+        await page.waitForTimeout(1_000);
+        console.log("[Audit] Opened filters panel");
+      }
+    }
+
+    // Step 2: Click the Action dropdown
     const trigger = page.getByTestId("select-filter-action");
     await trigger.waitFor({ state: "visible", timeout: 5_000 });
     await trigger.click();
     await page.waitForTimeout(500);
-    const option = page.getByRole("option", { name: actionName });
+
+    // Step 3: Select the option (exact match on name)
+    const option = page.getByRole("option", { name: actionName, exact: true });
     await option.waitFor({ state: "visible", timeout: 3_000 });
     await option.click();
     await page.waitForTimeout(1_500);
