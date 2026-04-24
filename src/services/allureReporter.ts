@@ -19,7 +19,7 @@ function saveAllureResult(data: Record<string, any>): void {
   ensureDir(ALLURE_RESULTS_DIR);
   const uuid = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const resultFile = path.join(ALLURE_RESULTS_DIR, `${uuid}-result.json`);
-  const result = { uuid, historyId: Buffer.from(data.fullName || data.name).toString("base64").slice(0, 32), ...data };
+const result = { uuid, historyId: uuid, ...data };
   fs.writeFileSync(resultFile, JSON.stringify(result, null, 2));
   console.log(`[Allure] Saved result: ${data.name} → ${data.status}`);
 }
