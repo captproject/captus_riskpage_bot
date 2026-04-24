@@ -295,8 +295,8 @@ app.post("/login-v2", authMiddleware, async (req: Request, res: Response) => {
       logo_validated: result.logo_validated,
     });
 const allureStatus = result.assertion_match === "pass" ? "success" : "failed";
-recordTestResult("01B_Login_Bot", "Login Tests", allureStatus, result.message, startTime, undefined, result.screenshot_url, {      
-  assertion_expected: result.status_expected,
+recordTestResult(`01B_Login_Bot — ${result.username}`, "Login Tests", allureStatus, result.message, startTime, undefined, result.screenshot_url, {
+    assertion_expected: result.status_expected,
       assertion_actual: result.status_actual,
       username: result.username,
     });
