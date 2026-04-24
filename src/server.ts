@@ -269,8 +269,8 @@ app.post("/audit-log", authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /login-v2 ──────────────────────────────────────────────────────────
-// New route for 01B_Login_Bot workflow
+// ───/login-v2 ROUTE IN src/server.ts ─────────────────────────
+
 app.post("/login-v2", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
   if (!input.username || !input.password) {
@@ -289,20 +289,32 @@ app.post("/login-v2", authMiddleware, async (req: Request, res: Response) => {
       assertion_match: result.assertion_match === "pass",
       screenshot_failure: result.screenshot_url,
     }, {
+      scenario: result.scenario,
       currentUrl: result.currentUrl,
       pageTitle: result.pageTitle,
       landing_page: result.landing_page,
       logo_validated: result.logo_validated,
     });
-const allureStatus = result.assertion_match === "pass" ? "success" : "failed";
-recordTestResult(`01B_Login_Bot — ${result.username}`, "Login Tests", allureStatus, result.message, startTime, undefined, result.screenshot_url, {
-    assertion_expected: result.status_expected,
+
+    // Allure status based on assertion_match (not raw status)
+    const allureStatus = result.assertion_match === "pass" ? "success" : "failed";
+    
+    // Use scenario description if available, else fallback to username
+    const testName = result.scenario 
+      ? `01B_Login_Bot — ${result.scenario}` 
+      : `01B_Login_Bot — ${result.username}`;
+
+    recordTestResult(testName, "Login Tests", allureStatus, result.message, startTime, undefined, result.screenshot_url, {
+      assertion_expected: result.status_expected,
       assertion_actual: result.status_actual,
       username: result.username,
     });
     res.status(result.status === "error" ? 500 : 200).json(result);
   } catch (err) {
-    recordTestResult("01B_Login_Bot", "Login Tests", "error", (err as Error).message, startTime, undefined, undefined, {
+    const testName = input.scenario 
+      ? `01B_Login_Bot — ${input.scenario}` 
+      : `01B_Login_Bot — ${input.username}`;
+    recordTestResult(testName, "Login Tests", "error", (err as Error).message, startTime, undefined, undefined, {
       assertion_expected: "Login successful",
       assertion_actual: (err as Error).message,
       username: input.username,
@@ -310,7 +322,6 @@ recordTestResult(`01B_Login_Bot — ${result.username}`, "Login Tests", allureSt
     res.status(500).json({ status: "error", message: (err as Error).message });
   }
 });
-
 // ─── Utility Routes ──────────────────────────────────────────────────────────
 
 app.post("/reset-browser", authMiddleware, async (_req: Request, res: Response) => {
