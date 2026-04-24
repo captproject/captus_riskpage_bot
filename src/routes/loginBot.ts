@@ -256,19 +256,14 @@ export async function performLoginBot(input: LoginBotInput): Promise<LoginBotRes
     // ── Capture screenshot for failures or assertion mismatches ──────────
     let screenshotUrl: string | null = null;
 
-    if (status !== "success" && !stillOnLogin) {
-      // Assertion failed after successful login
+    if (assertionMatch === "fail") {
+      // Only capture screenshot when assertion FAILED (unexpected behavior)
       const screenshotBuffer = await page.screenshot({ fullPage: true });
       await context.close();
       context = null;
       screenshotUrl = await uploadLoginScreenshot(screenshotBuffer, username, "assertion_fail");
-    } else if (stillOnLogin) {
-      // Login failed — capture screenshot showing error
-      const screenshotBuffer = await page.screenshot({ fullPage: true });
-      await context.close();
-      context = null;
-      screenshotUrl = await uploadLoginScreenshot(screenshotBuffer, username, status);
     } else {
+      // assertion_match = pass → expected behavior, no screenshot needed
       await context.close();
       context = null;
     }
