@@ -274,24 +274,19 @@ export async function performSessionTermination(
     console.log("[SessionTerm] Step 8: Try old captured cookies");
     let step8Pass = false;
     let step8Details = "";
-    let testContext: BrowserContext | null = null;
     try {
-      const browser2 = await getBrowser();
-      testContext = await browser2.newContext({ viewport: { width: 1280, height: 720 } });
-      await testContext.addCookies(capturedCookies);
-      const testPage = await testContext.newPage();
-      await testPage.goto(config.dashboardUrl, { waitUntil: "networkidle", timeout: 30_000 });
-      await testPage.waitForTimeout(2_500);
-      const finalUrl = testPage.url();
+      // Reuse same context - inject captured cookies and try protected page
+      // (avoids spawning second browser which causes memory crash on Render)
+      await context.addCookies(capturedCookies);
+      await page.goto(config.dashboardUrl, { waitUntil: "networkidle", timeout: 30_000 });
+      await page.waitForTimeout(2_500);
+      const finalUrl = page.url();
       step8Pass = finalUrl.includes("/login") || finalUrl.includes("/sign-in");
       step8Details = step8Pass
         ? `Old cookies rejected — redirected to ${new URL(finalUrl).pathname}`
         : `SECURITY ISSUE: Old cookies still grant access to ${new URL(finalUrl).pathname}`;
-      await testContext.close();
-      testContext = null;
     } catch (e) {
       step8Details = `Error: ${(e as Error).message}`;
-      if (testContext) await testContext.close().catch(() => {});
     }
     steps.push({
       step: 8,
