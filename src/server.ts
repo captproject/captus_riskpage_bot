@@ -1,12 +1,9 @@
 // ─── Captus Risk Bot — Modular Server v2.3 ────────────────────────────────────
 // Includes: All risk page routes + login-v2 + session-termination + Allure reporting
-
+import testProjectIsolationRouter from "./routes/testProjectIsolation";
 import express, { Request, Response, NextFunction } from "express";
 import { Config } from "./utils/types";
-import {
-  executionQueue, closeBrowser, invalidateSession,
-  isBrowserConnected, getCachedSessionUsername,
-} from "./services/browserManager";
+import { executionQueue, closeBrowser, invalidateSession,isBrowserConnected, getCachedSessionUsername,} from "./services/browserManager";
 import { withTimeout } from "./utils/retry";
 import { saveTestResult } from "./services/supabaseLogger";
 import { recordTestResult, saveAllureResult } from "./services/allureReporter";
@@ -37,6 +34,8 @@ export const config: Config = {
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+app.use("/", testProjectIsolationRouter);
+
 
 function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (!config.apiKey) { next(); return; }
