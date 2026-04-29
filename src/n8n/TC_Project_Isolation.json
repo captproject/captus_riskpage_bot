@@ -1,0 +1,209 @@
+{
+  "name": "TC_Project_Isolation",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 📋 TC_Project_Isolation — Setup Checklist\n\n**Purpose:** CP-6 — verifies project context switching + data isolation between `PRJ_A` and `TEST` projects in the `demo` company.\n\n---\n\n### After importing, fix these 2 things:\n\n**1. LOAD_CONFIG**\n• Open node → set *Workflow* dropdown → pick `00_Config_Loader`\n\n**2. SET_RESULT**\n• Open node → set *Credential* → pick your existing Supabase credential\n\n---\n\n### Test it manually first:\n1. Click **Execute Workflow** (top right)\n2. Each node should turn green\n3. Check Supabase → 1 new row in `workflow_results`\n4. **Then enable** Schedule Trigger\n\n---\n\n### Cron: `15 7 * * *` (daily 7:15 AM)\n\n### Slack notifications:\nNot in this workflow — they're emitted from the downstream allure-report aggregator after the full audit-log run completes. This workflow only writes to Supabase.\n\n### Required Supabase columns:\nRun ALTER TABLE in `INTEGRATION_CP6.md` §4 once before first execution.\n\n### API endpoint:\n`POST {{risk_bot_url}}/test-project-isolation`\nTimeout: 180s (full lifecycle ~90-120s)\n\n---\n\n### Flow:\n```\nTrigger → LOAD_CONFIG → SELECT_USER\n  → CALL_PLAYWRIGHT_API\n  → SET_RESULT (flatten + save)\n  → END\n```",
+        "height": 620,
+        "width": 380,
+        "color": 5
+      },
+      "id": "node-sticky-instructions",
+      "name": "📋 SETUP INSTRUCTIONS",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-220, 100]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "15 7 * * *" }
+          ]
+        }
+      },
+      "id": "node-schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 200],
+      "notes": "Daily at 7:15 AM. Disable while testing manually."
+    },
+    {
+      "parameters": {},
+      "id": "node-manual-trigger",
+      "name": "When clicking 'Execute workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [220, 420],
+      "notes": "Use this for manual test runs before enabling the schedule."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_CONFIG_LOADER_WORKFLOW_ID",
+          "mode": "list",
+          "cachedResultName": "00_Config_Loader"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "id": "node-load-config",
+      "name": "LOAD_CONFIG",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [440, 310],
+      "notes": "⚠️ Set Workflow dropdown to 00_Config_Loader. Pulls users + service URLs."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "u1", "name": "email",            "value": "={{ $json.users.qa_user.email }}",       "type": "string" },
+            { "id": "u2", "name": "password",         "value": "={{ $json.users.qa_user.password }}",    "type": "string" },
+            { "id": "u3", "name": "user_label",       "value": "qa_user",                                 "type": "string" },
+            { "id": "u4", "name": "risk_bot_url",     "value": "={{ $json.services.risk_bot_url }}",     "type": "string" },
+            { "id": "u5", "name": "risk_bot_api_key", "value": "={{ $json.services.risk_bot_api_key }}", "type": "string" }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "node-select-user",
+      "name": "SELECT_USER",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [660, 310],
+      "notes": "Flattens config so downstream nodes use $json.email / $json.password directly."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.risk_bot_url }}/test-project-isolation",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "x-api-key",    "value": "={{ $json.risk_bot_api_key }}" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "username", "value": "={{ $json.email }}" },
+            { "name": "password", "value": "={{ $json.password }}" }
+          ]
+        },
+        "options": {
+          "timeout": 180000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node-call-playwright-api",
+      "name": "CALL_PLAYWRIGHT_API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 310],
+      "notes": "POST /test-project-isolation. 180s timeout — full lifecycle takes ~90-120s. neverError=true so failed runs still flow downstream and get logged to Supabase."
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "workflow_results",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "test_case",         "fieldValue": "CP-6 Project Isolation" },
+            { "fieldId": "workflow_type",     "fieldValue": "project_isolation" },
+            { "fieldId": "status_expected",   "fieldValue": "success" },
+            { "fieldId": "status_actual",     "fieldValue": "={{ $json.status }}" },
+            { "fieldId": "assertion_match",   "fieldValue": "={{ $json.status === 'success' }}" },
+            { "fieldId": "username",          "fieldValue": "={{ $json.username }}" },
+            { "fieldId": "test_risk_a",       "fieldValue": "={{ $json.test_risks?.project_a }}" },
+            { "fieldId": "test_risk_b",       "fieldValue": "={{ $json.test_risks?.project_b }}" },
+            { "fieldId": "titles_a_count",    "fieldValue": "={{ $json.counts?.titles_a ?? 0 }}" },
+            { "fieldId": "titles_b_count",    "fieldValue": "={{ $json.counts?.titles_b ?? 0 }}" },
+            { "fieldId": "in_both_count",     "fieldValue": "={{ $json.counts?.in_both ?? 0 }}" },
+            { "fieldId": "leaked_titles",     "fieldValue": "={{ JSON.stringify($json.assertions?.zero_cross_contamination?.actual?.leaked_titles ?? []) }}" },
+            { "fieldId": "total_duration_ms", "fieldValue": "={{ $json.total_duration_ms ?? 0 }}" },
+            { "fieldId": "duration_seconds",  "fieldValue": "={{ Math.round(($json.total_duration_ms ?? 0) / 1000) }}" },
+            { "fieldId": "screenshot_url",    "fieldValue": "={{ $json.screenshot_url }}" },
+            { "fieldId": "company_verified",  "fieldValue": "={{ $json.company_verified }}" },
+            { "fieldId": "raw_payload",       "fieldValue": "={{ JSON.stringify($json) }}" }
+          ]
+        }
+      },
+      "id": "node-set-result",
+      "name": "SET_RESULT",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1100, 310],
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_WITH_SUPABASE_CREDENTIAL_ID",
+          "name": "Supabase QA Logs"
+        }
+      },
+      "notes": "⚠️ Set Credential. Flattens API response and inserts into workflow_results in one step. Slack notification happens later, downstream in the allure-report aggregator after the full audit-log run."
+    },
+    {
+      "parameters": {},
+      "id": "node-end",
+      "name": "END",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1320, 310],
+      "notes": "Visual terminator. The allure-report aggregator picks up this run from Supabase and emits the consolidated Slack message later."
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{ "node": "LOAD_CONFIG", "type": "main", "index": 0 }]]
+    },
+    "When clicking 'Execute workflow'": {
+      "main": [[{ "node": "LOAD_CONFIG", "type": "main", "index": 0 }]]
+    },
+    "LOAD_CONFIG": {
+      "main": [[{ "node": "SELECT_USER", "type": "main", "index": 0 }]]
+    },
+    "SELECT_USER": {
+      "main": [[{ "node": "CALL_PLAYWRIGHT_API", "type": "main", "index": 0 }]]
+    },
+    "CALL_PLAYWRIGHT_API": {
+      "main": [[{ "node": "SET_RESULT", "type": "main", "index": 0 }]]
+    },
+    "SET_RESULT": {
+      "main": [[{ "node": "END", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    { "createdAt": "2026-04-29T00:00:00.000Z", "updatedAt": "2026-04-29T00:00:00.000Z", "id": "tag-cp6", "name": "CP-6" },
+    { "createdAt": "2026-04-29T00:00:00.000Z", "updatedAt": "2026-04-29T00:00:00.000Z", "id": "tag-isolation", "name": "isolation" }
+  ],
+  "pinData": {},
+  "versionId": "",
+  "triggerCount": 2,
+  "meta": {
+    "instanceId": ""
+  }
+}
