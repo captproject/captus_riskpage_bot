@@ -135,18 +135,28 @@ export async function createContextAndLogin(
       await page.waitForTimeout(1_500);
 
       const onLogin = page.url().includes("/login");
-      if (!onLogin) {
-        // Check if company is selected
-        const companyBtn = page.getByTestId("button-company-selector");
-        const btnText = await companyBtn.textContent().catch(() => "");
-        if (btnText?.includes("All Companies")) {
-          console.log("[Session] Company not selected — selecting demo");
-          await selectCompany(page, "demo");
-          await selectProject(page, "Test");
-        }
-        console.log(`[Session] Reused session for ${username} — skipped login`);
-        return { context, page };
-      }
+if (!onLogin) {
+  // Always verify company is "demo"
+  const companyBtn = page.getByTestId("button-company-selector");
+  const companyText = (await companyBtn.textContent().catch(() => ""))?.trim() || "";
+  if (!companyText.toLowerCase().includes("demo")) {
+    console.log(`[Session] Company is "${companyText}" — switching to demo`);
+    await selectCompany(page, "demo");
+  }
+
+  // Always verify project is "Test"
+  const projectBtn = page.getByTestId("button-project-selector");
+  const projectText = (await projectBtn.textContent().catch(() => ""))?.trim() || "";
+  if (!projectText.toLowerCase().includes("test")) {
+    console.log(`[Session] Project is "${projectText}" — switching to Test`);
+    await selectProject(page, "Test");
+  } else {
+    console.log(`[Session] Project already correct: ${projectText}`);
+  }
+
+  console.log(`[Session] Reused session for ${username} — skipped login`);
+  return { context, page };
+}
       console.log("[Session] Session expired — falling back to login");
       invalidateSession();
     } catch {
