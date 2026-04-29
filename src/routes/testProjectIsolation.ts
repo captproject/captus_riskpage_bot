@@ -14,8 +14,8 @@
 // IMPORTANT — separation of concerns:
 //   - This route DOES NOT write to Supabase. It returns rich JSON.
 //   - The downstream n8n SET_RESULT node handles all DB writes.
-//   - This matches the existing pattern (other test routes follow the same
-//     contract: API returns data, n8n stores).
+//   - Allure: recordTestResult() is called at every exit path so this test
+//     case appears in the consolidated allure report alongside other tests.
 //
 // Login pattern: uses createContextAndLogin() which handles login + company
 // "demo" + project "Test" in one call. After login we land on Project B.
@@ -30,6 +30,7 @@ import { listRiskTitles } from "../services/riskListService";
 import { createRiskInProject } from "../services/riskCreateHelper";
 import { deleteRiskFromTable, searchRisk } from "../services/riskHelpers";
 import { uploadScreenshot } from "../utils/screenshot";
+import { recordTestResult } from "../services/allureReporter";
 
 // ── Project mapping (single source of truth) ──
 const PROJECTS = {
@@ -55,7 +56,61 @@ interface Assertion {
   match: boolean;
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// ─── Allure helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Translates the route's rich response payload into an Allure result entry.
+ * Called from `respond()` so every exit path lands in the allure report.
+ * Wrapped in try/catch — allure failure must NEVER break the HTTP response.
+ */
+function recordToAllure(payload: any, startTime: number): void {
+  try {
+    const assertions = payload?.assertions ?? {};
+    const matched = Object.values(assertions).filter((a: any) => a?.match).length;
+    const total = Object.keys(assertions).length;
+    const failedNames = Object.entries(assertions)
+      .filter(([_, a]: [string, any]) => !a?.match)
+      .map(([k]) => k)
+      .join(", ");
+
+    recordTestResult(
+      "TC_Project_Isolation",
+      "Project Isolation Tests",
+      payload?.status ?? "error",
+      payload?.message ?? "",
+      startTime,
+      undefined, // no 4-layer checks pattern (CP-6 has its own assertion shape)
+      payload?.screenshot_url ?? null,
+      {
+        risk_title: payload?.test_risks
+          ? `${payload.test_risks.project_a} | ${payload.test_risks.project_b}`
+          : undefined,
+        username: payload?.username,
+        assertion_expected:
+          "Both test risks isolated to their projects, zero cross-contamination",
+        assertion_actual:
+          payload?.status === "success"
+            ? `PASS — ${matched}/${total} assertions matched`
+            : `FAIL — ${failedNames || payload?.aborted_reason || payload?.message || "see details"}`,
+        failure_type: payload?.aborted_reason ?? null,
+        mode: "full",
+      }
+    );
+  } catch (err) {
+    console.error(`[Allure] Failed to record CP-6 result: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Single exit helper: records to allure, then sends HTTP response.
+ * Use INSTEAD of `res.status(X).json(payload)` everywhere in this route.
+ */
+function respond(res: Response, statusCode: number, payload: any, startTime: number): Response {
+  recordToAllure(payload, startTime);
+  return res.status(statusCode).json(payload);
+}
+
+// ─── Step / utility helpers ─────────────────────────────────────────────────
 
 async function runStep<T>(
   name: string,
@@ -159,7 +214,7 @@ async function abort(
     screenshot_url: screenshotUrl,
   };
   if (context) await context.close().catch(() => {});
-  return res.status(500).json(payload);
+  return respond(res, 500, payload, overallStart);
 }
 
 // ─── Route ──────────────────────────────────────────────────────────────────
@@ -212,7 +267,7 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
         total_duration_ms: Date.now() - overallStart,
         screenshot_url: null,
       };
-      return res.status(500).json(payload);
+      return respond(res, 500, payload, overallStart);
     }
 
     // ── Step 2: Strict pre-flight — company MUST be demo ──
@@ -456,7 +511,7 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
 
     if (context) await (context as BrowserContext).close().catch(() => {});
     context = null;
-    return res.status(overallStatus === "success" ? 200 : 500).json(payload);
+    return respond(res, overallStatus === "success" ? 200 : 500, payload, overallStart);
   } catch (err) {
     screenshotUrl = await captureFailureScreenshot(context, `project_isolation_error_${username}`);
     if (context) await (context as BrowserContext).close().catch(() => {});
@@ -472,7 +527,7 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
       total_duration_ms: Date.now() - overallStart,
       screenshot_url: screenshotUrl,
     };
-    return res.status(500).json(payload);
+    return respond(res, 500, payload, overallStart);
   }
 });
 
