@@ -15,7 +15,26 @@
 import { BrowserContext, Page, Cookie } from "playwright";
 import { config } from "../server";
 import { getBrowser, closeBrowser } from "../services/browserManager";
-import { uploadScreenshot } from "../utils/screenshot";
+
+// Inline screenshot upload (same pattern as loginBot.ts)
+async function uploadSessionScreenshot(buffer: Buffer, status: string): Promise<string | null> {
+  if (!config.supabaseUrl || !config.supabaseKey) return null;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const fileName = `session_termination_${status}_${timestamp}.png`;
+  try {
+    const response = await fetch(`${config.supabaseUrl}/storage/v1/object/screenshots/${fileName}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.supabaseKey}`,
+        "Content-Type": "image/png",
+        "x-upsert": "true",
+      },
+      body: buffer as unknown as BodyInit,
+    });
+    if (response.ok) return `${config.supabaseUrl}/storage/v1/object/public/screenshots/${fileName}`;
+    return null;
+  } catch { return null; }
+}
 
 export interface SessionTerminationInput {
   username: string;
@@ -371,7 +390,7 @@ async function finalizeResult(args: {
   if (!allPassed) {
     try {
       const buffer = await page.screenshot({ fullPage: true });
-      screenshotUrl = await uploadScreenshot(buffer, "session_termination", "fail");
+      screenshotUrl = await uploadSessionScreenshot(buffer, "fail");
     } catch (e) {
       console.log(`[SessionTerm] Screenshot upload failed: ${(e as Error).message}`);
     }
