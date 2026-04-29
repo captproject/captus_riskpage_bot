@@ -77,7 +77,6 @@ async function runStep<T>(
 }
 
 function timestamp(): string {
-  // YYYYMMDD_HHMMSS — matches the convention used in TC_Create_Risk
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
   return (
@@ -193,7 +192,7 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
   let page: Page | null = null;
 
   try {
-    // ── Step 1: Login (handles browser+context+page+login+demo+Test in one) ──
+    // ── Step 1: Login ──
     const loginStep = await runStep("login_with_session", async () => {
       const result = await createContextAndLogin(username, password);
       context = result.context;
@@ -217,8 +216,6 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
     }
 
     // ── Step 2: Strict pre-flight — company MUST be demo ──
-    // createContextAndLogin attempts demo selection but only WARNS on failure.
-    // We require strict verification before touching any data.
     const guardStep = await runStep("company_guard", async () => {
       const g = await ensureCompanyIsDemo(page!, requiredCompany);
       if (!g.ok) throw new Error(g.failure_reason ?? "company guard failed");
@@ -234,7 +231,7 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
       return await abort(res, context, username, "wrong_company", steps, assertions, startedAt, overallStart);
     }
 
-    // ── Step 3: Switch to Project A (we're on B by default after login) ──
+    // ── Step 3: Switch to Project A ──
     const switchAStep = await runStep("switch_to_a", () =>
       switchProject(page!, PROJECTS.B.code, PROJECTS.A.code).then((r) => {
         if (!r.switch_success) throw new Error(r.failure_reason ?? "switch to A failed");
@@ -282,7 +279,7 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
       return await abort(res, context, username, "create_b_failed", steps, assertions, startedAt, overallStart);
     }
 
-    // ── Step 7: Probe Project A (back-switch + list + 2 searches) ──
+    // ── Step 7: Probe Project A ──
     const probeAStep = await runStep("probe_a", async () => {
       const sw = await switchProject(page!, PROJECTS.B.code, PROJECTS.A.code);
       if (!sw.switch_success) throw new Error(sw.failure_reason ?? "switch back to A failed");
@@ -291,7 +288,7 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
     steps.push(probeAStep.step);
     const probeA = probeAStep.result;
 
-    // ── Step 8: Probe Project B (switch + list + 2 searches) ──
+    // ── Step 8: Probe Project B ──
     const probeBStep = await runStep("probe_b", async () => {
       const sw = await switchProject(page!, PROJECTS.A.code, PROJECTS.B.code);
       if (!sw.switch_success) throw new Error(sw.failure_reason ?? "switch to B for probe failed");

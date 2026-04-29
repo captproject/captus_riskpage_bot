@@ -1,30 +1,18 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // riskListService.ts
-// Reads the list of risk titles visible on the /risks page for the CURRENTLY
-// active project context. Used by CP-6 to validate data isolation between
-// projects.
+// Reads ALL risk titles visible on the /risks page for the currently active
+// project context. CP-6 uses this to compute symmetric difference between
+// Project A and Project B risk lists.
 //
-// ── Selectors ────────────────────────────────────────────────────────────────
-// These are educated guesses based on the table styling in your other test
-// cases (TC_Filter_Risks, TC_Edit_Risk). VERIFY before deploying:
-//
-//   1. Open https://captus.replit.app/risks
-//   2. Right-click a risk row → Inspect
-//   3. Look for the <tr> or row container's data-testid
-//   4. Look for the title cell's data-testid
-//
-// The two SEL_* constants below are the only things to adjust if the
-// markup differs.
+// Strategy: mirrors the row-detection approach in riskHelpers.ts'
+// readRiskRowFromTable() — uses "tr, [class*='border-b']" to handle both
+// table-based and div-based row rendering, and extracts the title from the
+// first cell text content. Runs as a single page.evaluate() for speed
+// (matters when the table has 100+ rows).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Page } from "playwright";
-
-// CHANGE THESE TWO IF YOUR /risks TABLE USES DIFFERENT TESTIDS
-const SEL_ROW = '[data-testid^="row-risk-"]';
-const SEL_TITLE_IN_ROW = '[data-testid^="text-risk-title-"], td:first-child a, td:nth-child(1)';
-
-// Fallback selector if the testid pattern doesn't exist — generic table row
-const SEL_ROW_FALLBACK = "table tbody tr";
+import { config } from "../server";
 
 export interface RiskListResult {
   titles: string[];
@@ -34,16 +22,7 @@ export interface RiskListResult {
   failure_reason: string | null;
 }
 
-/**
- * Navigate to /risks and return every visible risk title.
- *
- * Important: the caller is responsible for setting the project context
- * BEFORE calling this. This function only reads what's currently rendered.
- */
-export async function listRiskTitles(
-  page: Page,
-  baseUrl: string
-): Promise<RiskListResult> {
+export async function listRiskTitles(page: Page): Promise<RiskListResult> {
   const start = Date.now();
   const result: RiskListResult = {
     titles: [],
@@ -54,46 +33,53 @@ export async function listRiskTitles(
   };
 
   try {
-    const risksUrl = `${baseUrl.replace(/\/$/, "")}/risks`;
-    await page.goto(risksUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await page.goto(config.tableUrl, {
+      waitUntil: "networkidle",
+      timeout: config.navigationTimeout ?? 30_000,
+    });
     result.page_url = page.url();
+    await page.waitForTimeout(1_500); // settle after data fetch
 
-    // Wait for either: rows to appear, OR an "empty state" indicator
-    await Promise.race([
-      page.waitForSelector(SEL_ROW, { state: "visible", timeout: 10_000 }).catch(() => null),
-      page.waitForSelector(SEL_ROW_FALLBACK, { state: "visible", timeout: 10_000 }).catch(() => null),
-      page.waitForTimeout(10_000),
-    ]);
+    const titles = await page.evaluate(() => {
+      const rows = Array.from(
+        document.querySelectorAll("tr, [class*='border-b']")
+      );
+      const knownStatuses = ["Open", "In Review", "Mitigated", "Closed"];
+      const knownCategories = [
+        "Budget", "Schedule", "Safety", "Quality",
+        "Environmental", "Legal", "Technical", "Resource", "Other",
+      ];
 
-    // Settle — give the table a moment to finish rendering after data fetch
-    await page.waitForTimeout(1_000);
+      const seen = new Set<string>();
+      const out: string[] = [];
 
-    // Try the testid selector first
-    let rows = await page.locator(SEL_ROW).all();
+      for (const row of rows) {
+        if (row.querySelector("th")) continue;            // header row
+        const cells = row.querySelectorAll("td");
+        if (cells.length === 0) continue;                 // structural row
 
-    // If nothing matches the testid pattern, fall back to generic table rows
-    if (rows.length === 0) {
-      rows = await page.locator(SEL_ROW_FALLBACK).all();
-    }
+        const firstCellText = cells[0]?.textContent?.trim() ?? "";
 
-    for (const row of rows) {
-      // Try testid title first, then fall back to first cell text
-      let title: string | null = null;
+        if (
+          !firstCellText ||
+          firstCellText.length > 200 ||
+          knownStatuses.includes(firstCellText) ||
+          knownCategories.includes(firstCellText) ||
+          /^\d+$/.test(firstCellText)
+        ) {
+          continue;
+        }
 
-      const testidTitle = row.locator(SEL_TITLE_IN_ROW).first();
-      if (await testidTitle.count()) {
-        title = (await testidTitle.textContent())?.trim() ?? null;
+        if (!seen.has(firstCellText)) {
+          seen.add(firstCellText);
+          out.push(firstCellText);
+        }
       }
+      return out;
+    });
 
-      if (!title) {
-        // Last-ditch fallback: first <td> in the row
-        title = (await row.locator("td").first().textContent())?.trim() ?? null;
-      }
-
-      if (title) result.titles.push(title);
-    }
-
-    result.count = result.titles.length;
+    result.titles = titles;
+    result.count = titles.length;
     result.duration_ms = Date.now() - start;
     return result;
   } catch (err) {
