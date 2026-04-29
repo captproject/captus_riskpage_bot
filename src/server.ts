@@ -1,5 +1,5 @@
-// ─── Captus Risk Bot — Modular Server v2.2 ────────────────────────────────────
-// Includes: All risk page routes + login-v2 route + Allure reporting
+// ─── Captus Risk Bot — Modular Server v2.3 ────────────────────────────────────
+// Includes: All risk page routes + login-v2 + session-termination + Allure reporting
 
 import express, { Request, Response, NextFunction } from "express";
 import { Config } from "./utils/types";
@@ -9,7 +9,7 @@ import {
 } from "./services/browserManager";
 import { withTimeout } from "./utils/retry";
 import { saveTestResult } from "./services/supabaseLogger";
-import { recordTestResult } from "./services/allureReporter";
+import { recordTestResult, saveAllureResult } from "./services/allureReporter";
 import { allureRouter } from "./services/allureRoutes";
 
 import { performCreateRisk } from "./routes/createRisk";
@@ -20,6 +20,7 @@ import { performFilterRisks } from "./routes/filterRisk";
 import { performScoreMatrix } from "./routes/scoreMatrix";
 import { performAuditLog } from "./routes/auditLog";
 import { performLoginBot } from "./routes/loginBot";
+import { performSessionTermination } from "./routes/sessionTermination";
 
 export const config: Config = {
   loginUrl: process.env.LOGIN_URL || "https://captus.replit.app/login",
@@ -326,6 +327,106 @@ app.post("/login-v2", authMiddleware, async (req: Request, res: Response) => {
     res.status(500).json({ status: "error", message: (err as Error).message });
   }
 });
+
+// ─── POST /session-termination ───────────────────────────────────────────────
+app.post("/session-termination", authMiddleware, async (req: Request, res: Response) => {
+  const input = req.body;
+  if (!input.username || !input.password) {
+    res.status(400).json({ status: "error", message: "Missing: username, password" }); return;
+  }
+  const startTime = Date.now();
+  try {
+    const result = await executionQueue.add(() =>
+      withTimeout(() => performSessionTermination(input), 300_000, "session-termination")
+    );
+
+    await saveTestResult("TC_Session_Termination", {
+      status: result.status,
+      username: result.username,
+      message: result.steps_summary || result.message,
+      assertion_expected: `All ${result.total_steps} session security checks pass`,
+      assertion_actual: `${result.passed}/${result.total_steps} passed`,
+      assertion_match: result.assertion_match,
+      screenshot_failure: result.screenshot_url,
+    }, {
+      total_steps: result.total_steps,
+      passed: result.passed,
+      failed: result.failed,
+      steps: result.steps,
+    });
+
+    // Build Allure-format steps from session steps
+    const stopTime = Date.now();
+    const stepDuration = Math.floor((stopTime - startTime) / Math.max(result.steps.length, 1));
+    const allureSteps = result.steps.map((s, i) => ({
+      name: `Step ${s.step}: ${s.name}`,
+      status: s.status === "pass" ? "passed" as const : "failed" as const,
+      stage: "finished" as const,
+      start: startTime + stepDuration * i,
+      stop: startTime + stepDuration * (i + 1),
+      statusDetails: {
+        message: s.status === "pass"
+          ? `✅ Expected: ${s.expected} | Actual: ${s.actual}`
+          : `❌ Expected: ${s.expected} | Actual: ${s.actual}`,
+      },
+    }));
+
+    let description = `<h4>Session Termination Security Test</h4>`;
+    description += `<p><b>Status:</b> ${result.assertion_match ? "✅ ALL PASSED" : "❌ FAILED"}</p>`;
+    description += `<p><b>Result:</b> ${result.passed}/${result.total_steps} checks passed</p>`;
+    description += `<p><b>User:</b> ${result.username}</p>`;
+    description += `<hr/><h4>Step-by-Step Verification</h4>`;
+    description += `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse">`;
+    description += `<tr><th>#</th><th>Check</th><th>Expected</th><th>Actual</th><th>Result</th></tr>`;
+    for (const s of result.steps) {
+      description += `<tr><td>${s.step}</td><td>${s.name}</td><td>${s.expected}</td><td>${s.actual}</td><td>${s.status === "pass" ? "✅ PASS" : "❌ FAIL"}</td></tr>`;
+    }
+    description += `</table>`;
+
+    saveAllureResult({
+      name: "TC_Session_Termination",
+      fullName: "Security Tests > TC_Session_Termination",
+      status: result.assertion_match ? "passed" : "failed",
+      stage: "finished",
+      start: startTime,
+      stop: stopTime,
+      description,
+      descriptionHtml: description,
+      labels: [
+        { name: "suite", value: "Security Tests" },
+        { name: "parentSuite", value: "Captus QA Automation" },
+        { name: "subSuite", value: "TC_Session_Termination" },
+        { name: "epic", value: "Risk Management" },
+        { name: "feature", value: "Security Tests" },
+        { name: "story", value: "Session Termination" },
+        { name: "severity", value: "critical" },
+        { name: "framework", value: "Playwright" },
+        { name: "host", value: "Render" },
+      ],
+      statusDetails: result.assertion_match
+        ? { message: result.message }
+        : { message: result.message, trace: result.steps_summary },
+      steps: allureSteps,
+      parameters: [
+        { name: "Username", value: result.username },
+        { name: "Total Checks", value: String(result.total_steps) },
+        { name: "Passed", value: String(result.passed) },
+        { name: "Failed", value: String(result.failed) },
+      ],
+      attachments: result.screenshot_url
+        ? [{ name: "Failure Screenshot", source: result.screenshot_url, type: "text/uri-list" }]
+        : undefined,
+    });
+
+    res.status(result.status === "error" ? 500 : 200).json(result);
+  } catch (err) {
+    await saveTestResult("TC_Session_Termination", {
+      status: "error", username: input.username, message: (err as Error).message, assertion_match: false,
+    }, {});
+    res.status(500).json({ status: "error", message: (err as Error).message });
+  }
+});
+
 // ─── Utility Routes ──────────────────────────────────────────────────────────
 
 app.post("/reset-browser", authMiddleware, async (_req: Request, res: Response) => {
@@ -337,11 +438,11 @@ app.post("/reset-browser", authMiddleware, async (_req: Request, res: Response) 
 app.get("/health", (_req: Request, res: Response) => {
   const mem = process.memoryUsage();
   res.json({
-    status: "running", service: "captus-risk-bot", version: "2.2.0-allure-login",
+    status: "running", service: "captus-risk-bot", version: "2.3.0-session-termination",
     endpoints: [
       "/create-risk", "/edit-risk", "/delete-risk",
       "/risk-status-workflow", "/filter-risks", "/score-matrix",
-      "/audit-log", "/login-v2",
+      "/audit-log", "/login-v2", "/session-termination",
       "/reset-browser",
       "/generate-report", "/report", "/report-stats", "/clear-results",
     ],
@@ -353,11 +454,12 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 const server = app.listen(config.port, "0.0.0.0", () => {
-  console.log(`Risk Bot v2.2 (modular + allure + login) running on port ${config.port}`);
+  console.log(`Risk Bot v2.3 (modular + allure + login + session) running on port ${config.port}`);
   console.log(`Dashboard: ${config.dashboardUrl}`);
   console.log(`Login:     ${config.loginUrl}`);
   console.log(`Allure:    ENABLED (/report, /generate-report)`);
   console.log(`LoginBot:  ENABLED (/login-v2)`);
+  console.log(`Session:   ENABLED (/session-termination)`);
 });
 
 async function shutdown(): Promise<void> {

@@ -15,8 +15,8 @@ function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-function saveAllureResult(data: Record<string, any>): void {
-  ensureDir(ALLURE_RESULTS_DIR);
+export function saveAllureResult(data: Record<string, any>): void {
+    ensureDir(ALLURE_RESULTS_DIR);
   const uuid = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const resultFile = path.join(ALLURE_RESULTS_DIR, `${uuid}-result.json`);
 const result = { uuid, historyId: uuid, ...data };
