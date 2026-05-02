@@ -11,11 +11,11 @@
 //   4. Negative case — PRJ-A risk NOT visible in B's context
 //   5. Full lifecycle — Create → Validate → Delete → Validate
 //
-// IMPORTANT — separation of concerns:
-//   - This route DOES NOT write to Supabase. It returns rich JSON.
-//   - The downstream n8n SET_RESULT node handles all DB writes.
-//   - Allure: recordTestResult() is called at every exit path so this test
-//     case appears in the consolidated allure report alongside other tests.
+// Result recording (matches existing test cases via the respond() wrapper):
+//   - Supabase: saveTestResult("TC_Project_Isolation", common, details)
+//                writes a row to workflow_results, same schema as TC_Create_Risk etc.
+//   - Allure:   recordTestResult(...) writes a *-result.json file the audit-log
+//                aggregator picks up and consolidates into the report.
 //
 // Login pattern: uses createContextAndLogin() which handles login + company
 // "demo" + project "Test" in one call. After login we land on Project B.
@@ -31,6 +31,7 @@ import { createRiskInProject } from "../services/riskCreateHelper";
 import { deleteRiskFromTable, searchRisk } from "../services/riskHelpers";
 import { uploadScreenshot } from "../utils/screenshot";
 import { recordTestResult } from "../services/allureReporter";
+import { saveTestResult } from "../services/supabaseLogger";
 
 // ── Project mapping (single source of truth) ──
 const PROJECTS = {
@@ -56,42 +57,50 @@ interface Assertion {
   match: boolean;
 }
 
-// ─── Allure helpers ─────────────────────────────────────────────────────────
+// ─── Result-recording helpers ───────────────────────────────────────────────
 
 /**
- * Translates the route's rich response payload into an Allure result entry.
- * Called from `respond()` so every exit path lands in the allure report.
- * Wrapped in try/catch — allure failure must NEVER break the HTTP response.
+ * Translates the route's rich response payload into Allure result entry +
+ * Supabase row, matching the existing TC_Create_Risk shape.
+ *
+ * Both calls are wrapped in try/catch — a logging failure must NEVER break
+ * the HTTP response.
  */
-function recordToAllure(payload: any, startTime: number): void {
-  try {
-    const assertions = payload?.assertions ?? {};
-    const matched = Object.values(assertions).filter((a: any) => a?.match).length;
-    const total = Object.keys(assertions).length;
-    const failedNames = Object.entries(assertions)
-      .filter(([_, a]: [string, any]) => !a?.match)
-      .map(([k]) => k)
-      .join(", ");
+async function recordResult(payload: any, startTime: number): Promise<void> {
+  const assertions = payload?.assertions ?? {};
+  const matched = Object.values(assertions).filter((a: any) => a?.match).length;
+  const total = Object.keys(assertions).length;
+  const failedNames = Object.entries(assertions)
+    .filter(([_, a]: [string, any]) => !a?.match)
+    .map(([k]) => k)
+    .join(", ");
 
+  const riskTitle = payload?.test_risks
+    ? `${payload.test_risks.project_a} | ${payload.test_risks.project_b}`
+    : null;
+
+  const assertionExpected =
+    "Both test risks isolated to their projects, zero cross-contamination";
+  const assertionActual =
+    payload?.status === "success"
+      ? `PASS — ${matched}/${total} assertions matched`
+      : `FAIL — ${failedNames || payload?.aborted_reason || payload?.message || "see details"}`;
+
+  // ── Allure ──
+  try {
     recordTestResult(
       "TC_Project_Isolation",
       "Project Isolation Tests",
       payload?.status ?? "error",
       payload?.message ?? "",
       startTime,
-      undefined, // no 4-layer checks pattern (CP-6 has its own assertion shape)
+      undefined,
       payload?.screenshot_url ?? null,
       {
-        risk_title: payload?.test_risks
-          ? `${payload.test_risks.project_a} | ${payload.test_risks.project_b}`
-          : undefined,
+        risk_title: riskTitle ?? undefined,
         username: payload?.username,
-        assertion_expected:
-          "Both test risks isolated to their projects, zero cross-contamination",
-        assertion_actual:
-          payload?.status === "success"
-            ? `PASS — ${matched}/${total} assertions matched`
-            : `FAIL — ${failedNames || payload?.aborted_reason || payload?.message || "see details"}`,
+        assertion_expected: assertionExpected,
+        assertion_actual: assertionActual,
         failure_type: payload?.aborted_reason ?? null,
         mode: "full",
       }
@@ -99,14 +108,47 @@ function recordToAllure(payload: any, startTime: number): void {
   } catch (err) {
     console.error(`[Allure] Failed to record CP-6 result: ${(err as Error).message}`);
   }
+
+  // ── Supabase ──
+  try {
+    await saveTestResult(
+      "TC_Project_Isolation",
+      {
+        status: payload?.status ?? "error",
+        username: payload?.username ?? "",
+        risk_title: riskTitle,
+        message: payload?.message ?? null,
+        assertion_expected: assertionExpected,
+        assertion_actual: assertionActual,
+        assertion_match: payload?.status === "success",
+        screenshot_failure: payload?.screenshot_url ?? null,
+      },
+      {
+        company_verified: payload?.company_verified,
+        test_risks: payload?.test_risks,
+        assertions: payload?.assertions,
+        steps: payload?.steps,
+        counts: payload?.counts,
+        aborted_reason: payload?.aborted_reason,
+        total_duration_ms: payload?.total_duration_ms,
+      }
+    );
+  } catch (err) {
+    console.error(`[Supabase] Failed to save CP-6 result: ${(err as Error).message}`);
+  }
 }
 
 /**
- * Single exit helper: records to allure, then sends HTTP response.
+ * Single exit helper: records to allure + supabase, then sends HTTP response.
  * Use INSTEAD of `res.status(X).json(payload)` everywhere in this route.
  */
-function respond(res: Response, statusCode: number, payload: any, startTime: number): Response {
-  recordToAllure(payload, startTime);
+async function respond(
+  res: Response,
+  statusCode: number,
+  payload: any,
+  startTime: number
+): Promise<Response> {
+  await recordResult(payload, startTime);
   return res.status(statusCode).json(payload);
 }
 
@@ -214,7 +256,7 @@ async function abort(
     screenshot_url: screenshotUrl,
   };
   if (context) await context.close().catch(() => {});
-  return respond(res, 500, payload, overallStart);
+  return await respond(res, 500, payload, overallStart);
 }
 
 // ─── Route ──────────────────────────────────────────────────────────────────
@@ -267,7 +309,7 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
         total_duration_ms: Date.now() - overallStart,
         screenshot_url: null,
       };
-      return respond(res, 500, payload, overallStart);
+      return await respond(res, 500, payload, overallStart);
     }
 
     // ── Step 2: Strict pre-flight — company MUST be demo ──
@@ -511,7 +553,7 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
 
     if (context) await (context as BrowserContext).close().catch(() => {});
     context = null;
-    return respond(res, overallStatus === "success" ? 200 : 500, payload, overallStart);
+    return await respond(res, overallStatus === "success" ? 200 : 500, payload, overallStart);
   } catch (err) {
     screenshotUrl = await captureFailureScreenshot(context, `project_isolation_error_${username}`);
     if (context) await (context as BrowserContext).close().catch(() => {});
@@ -527,7 +569,7 @@ router.post("/test-project-isolation", async (req: Request, res: Response) => {
       total_duration_ms: Date.now() - overallStart,
       screenshot_url: screenshotUrl,
     };
-    return respond(res, 500, payload, overallStart);
+    return await respond(res, 500, payload, overallStart);
   }
 });
 
