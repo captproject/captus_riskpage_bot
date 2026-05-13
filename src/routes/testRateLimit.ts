@@ -4,27 +4,28 @@
 //
 // Endpoint: POST /test-rate-limit
 //
-// Validates that Captus enforces login rate limiting AND surfaces the EXACT
-// expected 429 modal message:
+// Validates that Captus enforces login rate limiting AND the 429 modal's
+// `message` field EQUALS EXACTLY:
 //   "Too many authentication attempts. Please try again in a minute."
 //
-// Why only the 429 modal:
-//   The 401 (wrong password) modal is validated by other login TCs. SEC-1
-//   focuses exclusively on the rate-limit behavior — we don't read or assert
-//   on the 401 modal text here, just track the HTTP status to know when
-//   bad-credential attempts give way to rate limiting.
+// STRICT EQUALITY mode:
+//   The modal in Captus renders as a multi-line block:
+//     Line 1: "Login failed" (header)
+//     Line 2: 429: {"message":"Too many authentication attempts. Please try again in a minute."}
 //
-// Test design — STRICT, exact-text match:
-//   - rate_limit_triggered:    EITHER 429 captured OR exact modal text seen
-//                              within MAX_ATTEMPTS attempts.
-//   - exact_modal_text_seen:   The literal string EXPECTED_429_MESSAGE appears
-//                              on the page at the moment 429 fires.
-//   - rate_limit_recovered:    Valid login succeeds after 65s wait.
+//   We extract the `message` field from the JSON portion via regex, then
+//   compare it with `===` to EXPECTED_429_MESSAGE. The header and JSON wrapper
+//   are ignored. Only the message itself is asserted.
+//
+//   If Captus changes the format and our regex can't find the JSON, the test
+//   fails — which is by design. A format change is worth investigating.
+//
+// Why only validate the 429 modal:
+//   The 401 (wrong password) modal is covered by other login TCs.
 //
 // Why fake email for the burst:
-//   Using a non-existent email triggers Captus's rate limiter (typically per-IP
-//   or per-session) without locking the QA account under per-username throttling.
-//   Recovery uses the REAL QA user with correct password.
+//   Triggers rate limiter without locking the QA account under per-username
+//   throttling. Recovery uses the REAL QA user with correct password.
 //
 // No data created — no cleanup needed.
 // Runtime: ~90-100s total (≤30 attempts × ~2s + 65s wait + ~5s recovery).
@@ -47,9 +48,8 @@ const ATTEMPT_WAIT_MS = 1500;     // Pause after click for response + UI render
 const RECOVERY_WAIT_MS = 65_000;  // TC says 60s; +5s buffer
 
 /**
- * The EXACT text expected in the 429 modal/error.
- * STRICT match — if Captus changes wording or punctuation, this test fails
- * (intentional: catches regressions in user-facing security messaging).
+ * The EXACT message expected inside the JSON wrapper of the 429 modal.
+ * STRICT EQUALITY — extracted message must EQUAL this string byte-for-byte.
  */
 const EXPECTED_429_MESSAGE =
   "Too many authentication attempts. Please try again in a minute.";
@@ -59,9 +59,10 @@ const EXPECTED_429_MESSAGE =
 interface AttemptResult {
   attempt: number;
   http_status: number | null;   // 401 = bad creds, 429 = rate limit, null = no API call captured
-  rate_limited: boolean;        // 429 status observed OR exact modal text seen
-  modal_text_at_429: string | null; // only populated when rate_limited=true
-  exact_text_match: boolean;    // true if modal_text contains EXPECTED_429_MESSAGE
+  rate_limited: boolean;        // true when http_status === 429
+  modal_raw_text: string | null;     // full raw modal text (for debugging)
+  extracted_message: string | null;  // value of the message field after JSON-regex extraction
+  exact_text_match: boolean;         // extracted_message === EXPECTED_429_MESSAGE
   duration_ms: number;
 }
 
@@ -83,9 +84,9 @@ function timestamp(): string {
 }
 
 /**
- * Scrape all visible text from common error/alert containers on the page.
- * Used ONLY when we suspect rate limiting (after seeing a 429) — we do NOT
- * read the page on 401 attempts.
+ * Read all visible text from common error/alert containers on the page.
+ * Returns the full multi-line modal contents (e.g., "Login failed\n429: {...}").
+ * Used ONLY when 429 is observed — we do NOT scrape on 401 attempts.
  */
 async function readPageErrorText(page: Page): Promise<string | null> {
   try {
@@ -112,12 +113,10 @@ async function readPageErrorText(page: Page): Promise<string | null> {
           }
         }
       }
-      // Also check the entire body text as fallback — captures cases where the
-      // message renders directly into form area without a recognized container
+      // Fallback: scan body text if no recognized container matched
       if (found.length === 0) {
         const bodyText = (document.body.innerText || "").trim();
         if (bodyText.includes("Too many") || bodyText.includes("429")) {
-          // Return just the relevant region — extract up to 500 chars around the keyword
           const idx = bodyText.toLowerCase().indexOf("too many");
           if (idx >= 0) {
             const start = Math.max(0, idx - 50);
@@ -134,9 +133,35 @@ async function readPageErrorText(page: Page): Promise<string | null> {
   }
 }
 
-function isExactMatch(text: string | null): boolean {
-  if (!text) return false;
-  return text.includes(EXPECTED_429_MESSAGE);
+/**
+ * Extract the `message` field value from a JSON-wrapped modal string.
+ *
+ * Input  (what readPageErrorText returns):
+ *   "Login failed\n429: {\"message\":\"Too many authentication attempts...\"}"
+ *
+ * Output (extracted message only):
+ *   "Too many authentication attempts. Please try again in a minute."
+ *
+ * Returns null if no JSON `"message":"..."` pattern is found in the text.
+ * Falsy result implies the test should FAIL — Captus's modal format diverged.
+ */
+function extractMessageFromModal(text: string | null): string | null {
+  if (!text) return null;
+  // Match: "message" : "<captured content>"
+  // Allow flexible whitespace around the colon.
+  // The captured group stops at the first unescaped closing quote.
+  const m = text.match(/"message"\s*:\s*"((?:\\"|[^"])*)"/);
+  if (!m) return null;
+  // Unescape any \\" sequences in the captured value
+  return m[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+}
+
+/**
+ * STRICT EQUALITY — extracted message must equal EXPECTED_429_MESSAGE exactly.
+ */
+function isStrictMatch(extractedMessage: string | null): boolean {
+  if (extractedMessage === null) return false;
+  return extractedMessage === EXPECTED_429_MESSAGE;
 }
 
 // ─── Result recording (matches CP-6 / SEC-11 pattern) ───────────────────────
@@ -155,7 +180,7 @@ async function recordResult(payload: any, startTime: number): Promise<void> {
     .filter((k) => assertions[k]?.match === false)
     .join(", ");
 
-  const assertionExpected = `Rate limit triggers within ${MAX_ATTEMPTS} attempts AND modal text equals "${EXPECTED_429_MESSAGE}", AND valid login recovers after 65s`;
+  const assertionExpected = `Rate limit triggers within ${MAX_ATTEMPTS} attempts AND modal "message" field equals exactly "${EXPECTED_429_MESSAGE}" AND valid login recovers after 65s`;
   const assertionActual =
     payload?.status === "success"
       ? `PASS — ${matchedStrict}/${strictKeys.length} strict assertions matched (triggered at attempt ${payload?.first_rate_limited_at ?? "?"})`
@@ -202,6 +227,7 @@ async function recordResult(payload: any, startTime: number): Promise<void> {
         attempts: payload?.attempts,
         first_rate_limited_at: payload?.first_rate_limited_at,
         modal_text_captured: payload?.modal_text_captured,
+        modal_raw_text: payload?.modal_raw_text,
         recovery_url: payload?.recovery_url,
         counts: payload?.counts,
         aborted_reason: payload?.aborted_reason,
@@ -266,7 +292,8 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
   let page: Page | null = null;
   let screenshotUrl: string | null = null;
   let firstRateLimitedAt: number | null = null;
-  let modalTextCaptured: string | null = null;
+  let modalTextCaptured: string | null = null;       // EXTRACTED message
+  let modalRawTextCaptured: string | null = null;    // full modal text (for debug)
 
   console.log(`[RateLimit] Starting SEC-1 test — fake email: ${fakeEmail}`);
   console.log(`[RateLimit] Expected 429 message: "${EXPECTED_429_MESSAGE}"`);
@@ -280,7 +307,7 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
     context.setDefaultTimeout(config.navigationTimeout);
     page = await context.newPage();
 
-    // Capture every response from the login flow.
+    // Capture every login/auth response from the network
     page.on("response", (response) => {
       const url = response.url();
       const status = response.status();
@@ -306,7 +333,7 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
       const attemptStart = Date.now();
       const networkPos = networkLog.length;
 
-      // Clear + refill (some apps don't auto-clear inputs after a failed submit)
+      // Clear + refill inputs
       try {
         await emailLocator.fill("");
         await passwordLocator.fill("");
@@ -314,14 +341,12 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
         await passwordLocator.fill(fakePassword);
       } catch (err) {
         console.log(`[RateLimit] Attempt ${i} — fill failed: ${(err as Error).message}`);
-        // Try reloading the page if inputs broke
         await page.goto(config.loginUrl, { waitUntil: "networkidle" }).catch(() => {});
         await emailLocator.waitFor({ state: "visible", timeout: 10_000 }).catch(() => {});
         await emailLocator.fill(fakeEmail).catch(() => {});
         await passwordLocator.fill(fakePassword).catch(() => {});
       }
 
-      // Click Login (don't wait for navigation — we don't expect success on bad creds)
       await loginButton.click().catch(() => {});
 
       // Pause for response + UI render
@@ -333,17 +358,19 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
         newResponses.find((r) => /login|auth|session/i.test(r.url)) ?? null;
       const httpStatus = loginResponse?.status ?? null;
 
-      // ── Only read the page when we suspect rate limiting (HTTP 429) ──
-      // For 401 attempts we don't validate modal text (covered by other TCs).
-      let modalText: string | null = null;
+      // Only read + validate the modal when 429 fires
+      let modalRawText: string | null = null;
+      let extractedMessage: string | null = null;
       let exactMatch = false;
-      let rateLimited = httpStatus === 429;
+      const rateLimited = httpStatus === 429;
 
       if (rateLimited) {
-        modalText = await readPageErrorText(page);
-        exactMatch = isExactMatch(modalText);
+        modalRawText = await readPageErrorText(page);
+        extractedMessage = extractMessageFromModal(modalRawText);
+        exactMatch = isStrictMatch(extractedMessage);
         if (exactMatch) {
-          modalTextCaptured = modalText;
+          modalTextCaptured = extractedMessage; // store extracted message only
+          modalRawTextCaptured = modalRawText;
         }
       }
 
@@ -351,7 +378,8 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
         attempt: i,
         http_status: httpStatus,
         rate_limited: rateLimited,
-        modal_text_at_429: modalText,
+        modal_raw_text: modalRawText,
+        extracted_message: extractedMessage,
         exact_text_match: exactMatch,
         duration_ms: Date.now() - attemptStart,
       };
@@ -360,11 +388,11 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
       console.log(
         `[RateLimit] Attempt ${i}/${MAX_ATTEMPTS}: HTTP=${httpStatus}` +
           (rateLimited
-            ? ` | modal_exact_match=${exactMatch} | text="${modalText?.slice(0, 120) ?? ""}"`
+            ? ` | extracted="${extractedMessage ?? "<null>"}" | exact_match=${exactMatch}`
             : "")
       );
 
-      // First time we see rate limiting — screenshot & break
+      // First time 429 fires — screenshot, break
       if (rateLimited && firstRateLimitedAt === null) {
         firstRateLimitedAt = i;
         try {
@@ -373,16 +401,15 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
             buf,
             `sec1_rate_limit_modal_attempt_${i}`
           );
-          console.log(`[RateLimit] Modal captured at attempt ${i}`);
+          console.log(`[RateLimit] Modal screenshot captured at attempt ${i}`);
         } catch (err) {
           console.log(`[RateLimit] Screenshot failed: ${(err as Error).message}`);
         }
-        // Break the loop — we have what we need
         break;
       }
     }
 
-    // ── Step 4: Aggregate burst-phase findings ──
+    // ── Step 4: Build burst-phase assertions ──
     const triggered = firstRateLimitedAt !== null;
     const firstAttemptResult = triggered ? attempts[firstRateLimitedAt! - 1] : null;
     const exactTextSeen = attempts.some((a) => a.exact_text_match === true);
@@ -396,17 +423,19 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
     };
 
     assertions.exact_modal_text_seen = {
-      expected: `Modal text contains EXACT string: "${EXPECTED_429_MESSAGE}"`,
+      expected: `Modal "message" field equals EXACTLY: "${EXPECTED_429_MESSAGE}"`,
       actual: exactTextSeen
-        ? `MATCH — captured: "${modalTextCaptured?.slice(0, 200) ?? ""}"`
-        : firstAttemptResult?.modal_text_at_429
-          ? `MISMATCH — got: "${firstAttemptResult.modal_text_at_429.slice(0, 200)}"`
-          : "No modal text captured",
+        ? `MATCH — extracted: "${modalTextCaptured ?? ""}"`
+        : firstAttemptResult?.extracted_message
+          ? `MISMATCH — extracted: "${firstAttemptResult.extracted_message}" (expected: "${EXPECTED_429_MESSAGE}")`
+          : firstAttemptResult?.modal_raw_text
+            ? `NO JSON MESSAGE FOUND — raw modal: "${firstAttemptResult.modal_raw_text.slice(0, 200)}"`
+            : "No modal text captured",
       match: exactTextSeen,
     };
 
     if (!triggered) {
-      // Burst didn't trigger rate limit — skip recovery and report failure
+      // Burst didn't trigger rate limit
       assertions.rate_limit_recovered = {
         expected: "Valid login succeeds after 65s wait",
         actual: "skipped — burst never triggered rate limit",
@@ -414,12 +443,13 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
       };
       const payload = {
         status: "failed" as const,
-        message: `Rate limiting NOT triggered after ${attempts.length} attempts — either Captus has no rate limit on /login or our detection missed it`,
+        message: `Rate limiting NOT triggered after ${attempts.length} attempts`,
         username,
         assertions,
         attempts,
         first_rate_limited_at: null,
         modal_text_captured: null,
+        modal_raw_text: null,
         counts: {
           total_attempts: attempts.length,
           http_429_count: attempts.filter((a) => a.http_status === 429).length,
@@ -455,7 +485,6 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
 
       await loginButton.click();
 
-      // Wait for redirect away from /login (success indicator)
       await page
         .waitForURL((url) => !url.pathname.includes("/login"), {
           timeout: 20_000,
@@ -486,8 +515,7 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
         }
       }
 
-      // ── Final verdict ──
-      // All 3 strict assertions must pass: triggered, exact_text, recovered
+      // ── Final verdict — all 3 strict assertions must match ──
       const allStrictMatch =
         assertions.rate_limit_triggered.match &&
         assertions.exact_modal_text_seen.match &&
@@ -498,13 +526,14 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
         status: overallStatus,
         message:
           overallStatus === "success"
-            ? `Rate limit verified — 429 at attempt ${firstRateLimitedAt}, exact modal text matched, recovery successful`
+            ? `Rate limit verified — 429 at attempt ${firstRateLimitedAt}, modal message equals expected, recovery successful`
             : `Rate limit test failed — see assertions for details`,
         username,
         assertions,
         attempts,
         first_rate_limited_at: firstRateLimitedAt,
         modal_text_captured: modalTextCaptured,
+        modal_raw_text: modalRawTextCaptured,
         recovery_url: afterUrl,
         counts: {
           total_attempts: attempts.length,
@@ -542,6 +571,7 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
         attempts,
         first_rate_limited_at: firstRateLimitedAt,
         modal_text_captured: modalTextCaptured,
+        modal_raw_text: modalRawTextCaptured,
         counts: {
           total_attempts: attempts.length,
           http_429_count: attempts.filter((a) => a.http_status === 429).length,
@@ -568,6 +598,7 @@ router.post("/test-rate-limit", async (req: Request, res: Response) => {
       attempts,
       first_rate_limited_at: firstRateLimitedAt,
       modal_text_captured: modalTextCaptured,
+      modal_raw_text: modalRawTextCaptured,
       started_at: startedAt,
       ended_at: new Date().toISOString(),
       total_duration_ms: Date.now() - overallStart,
