@@ -18,6 +18,8 @@ import { performScoreMatrix } from "./routes/scoreMatrix";
 import { performAuditLog } from "./routes/auditLog";
 import { performLoginBot } from "./routes/loginBot";
 import { performSessionTermination } from "./routes/sessionTermination";
+import testInjectionRouter from "./routes/testInjection";
+
 
 export const config: Config = {
   loginUrl: process.env.LOGIN_URL || "https://captus.replit.app/login",
@@ -35,6 +37,7 @@ export const config: Config = {
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use("/", testProjectIsolationRouter);
+app.use("/", testInjectionRouter);
 
 
 function authMiddleware(req: Request, res: Response, next: NextFunction): void {
