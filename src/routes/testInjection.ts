@@ -16,9 +16,16 @@
 //   STRICT (any failure = test FAIL + screenshot):
 //     - no_sql_leakage_detected
 //     - no_xss_executed
-//     - no_reflected_xss
+//     - no_reflected_xss     ← uses DOM queries, NOT raw-HTML scanning
 //   TOLERANT (warn only — Captus may legitimately reject ugly input):
 //     - no_crashes  (500 responses logged but don't fail)
+//
+// FALSE-POSITIVE FIX (May 2026):
+//   The old detector used `html.includes(marker)` against page.content(),
+//   which falsely matched when payloads appeared inside React's serialized
+//   state JSON (always in a <script> tag — harmless). The new detector only
+//   counts ACTUAL rendered DOM elements: <img onerror>, <a href="javascript:">,
+//   or executable <script> in <body>.
 //
 // Cleanup: all INJECTION_TEST_* risks deleted in batch at the end.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +42,6 @@ import { saveTestResult } from "../services/supabaseLogger";
 import {
   PAYLOADS,
   SQL_ERROR_SIGNATURES,
-  XSS_REFLECTION_MARKERS,
   InjectionPayload,
 } from "../services/injectionPayloads";
 import { XssWatchdog } from "../services/xssWatchdog";
@@ -99,7 +105,18 @@ async function detectSqlLeakage(page: Page): Promise<boolean> {
   }
 }
 
-/** Detect reflected XSS in the rendered DOM after viewing the risk. */
+/**
+ * Detect REAL reflected XSS in the rendered DOM.
+ *
+ * Looks for actual rendered HTML elements created from user input — NOT for
+ * payload strings that appear inside <script type="application/json"> blobs
+ * or as text content (both of which are completely safe).
+ *
+ * Three real-XSS signals:
+ *   1. <img> element with executable onerror= attribute
+ *   2. <a> element with href="javascript:..."
+ *   3. <script> element in <body> containing user-supplied alert() call
+ */
 async function detectReflectedXss(
   page: Page,
   payload: string
@@ -107,25 +124,57 @@ async function detectReflectedXss(
   const locations: string[] = [];
 
   try {
-    // Look for any of the XSS reflection markers as literal HTML in the page
-    const html = await page.content();
-    for (const marker of XSS_REFLECTION_MARKERS) {
-      if (html.includes(marker)) {
-        locations.push(`Marker "${marker}" found in page HTML (raw, not escaped)`);
+    // ── Signal 1: <img onerror="...alert..."> in DOM ──
+    if (/onerror\s*=/i.test(payload)) {
+      const dangerousImgCount = await page.evaluate(() => {
+        const imgs = Array.from(document.querySelectorAll("img[onerror]"));
+        return imgs.filter((img) =>
+          /alert\s*\(/.test(img.getAttribute("onerror") || "")
+        ).length;
+      });
+      if (dangerousImgCount > 0) {
+        locations.push(
+          `Found ${dangerousImgCount} <img onerror="alert(...)"> element(s) actually rendered in DOM`
+        );
       }
     }
 
-    // Also check: is the FULL payload present unescaped? Compare exact-substring
-    // against raw HTML — payload appearing as escaped text (e.g. &lt;script&gt;)
-    // is SAFE, but as <script> in raw HTML is unsafe.
-    const trimmed = payload.trim();
-    if (trimmed.length > 8 && html.includes(trimmed) && trimmed.includes("<")) {
-      // Heuristic: if our raw "<...>" payload appears verbatim in HTML, it might
-      // be inside <script> or an attribute. Either is bad.
-      locations.push(`Raw payload "${previewPayload(trimmed)}" found unescaped in HTML`);
+    // ── Signal 2: <a href="javascript:..."> in DOM ──
+    if (/javascript\s*:/i.test(payload)) {
+      const dangerousLinkCount = await page.evaluate(() => {
+        const anchors = Array.from(
+          document.querySelectorAll('a[href^="javascript:" i]')
+        );
+        return anchors.filter((a) =>
+          /alert\s*\(/.test(a.getAttribute("href") || "")
+        ).length;
+      });
+      if (dangerousLinkCount > 0) {
+        locations.push(
+          `Found ${dangerousLinkCount} <a href="javascript:alert(...)"> element(s) in DOM`
+        );
+      }
+    }
+
+    // ── Signal 3: <script> element in <body> with user-supplied alert() ──
+    // Note: <script> tags inserted via innerHTML are inert per HTML spec, but if
+    // Captus server-side renders user content into a <script> tag (e.g. via SSR
+    // template injection), it WOULD execute. Worth checking.
+    if (/<script[\s>]/i.test(payload)) {
+      const injectedScriptCount = await page.evaluate(() => {
+        const scripts = Array.from(document.querySelectorAll("body script"));
+        return scripts.filter((s) =>
+          /alert\s*\(\s*['"]XSS['"]\s*\)/i.test(s.textContent || "")
+        ).length;
+      });
+      if (injectedScriptCount > 0) {
+        locations.push(
+          `Found ${injectedScriptCount} <body><script> element(s) with injected alert() call`
+        );
+      }
     }
   } catch {
-    // ignore — could not read page
+    // best-effort — DOM evaluation can fail mid-navigation
   }
 
   return { found: locations.length > 0, locations };
@@ -146,8 +195,6 @@ async function runOnePayload(
   username: string
 ): Promise<PayloadResult> {
   const start = Date.now();
-  // Marker-only title (so cleanup can find it). The payload itself goes in the
-  // chosen field. Even when field=title, we keep the prefix readable for cleanup.
   const titleUsed = `${CLEANUP_PREFIX}${idx}_${payload.id}_${ts}`;
 
   const result: PayloadResult = {
@@ -176,9 +223,9 @@ async function runOnePayload(
     // Drain any pre-existing events
     watchdog.drain();
 
-    // Build the field-specific input
-    // When field=title, the payload IS the title. We append a unique suffix so
-    // cleanup can identify it. When field=description, title is just the marker.
+    // Build the field-specific input. When field=title, the payload IS the title
+    // (suffixed to a unique marker so cleanup can find it). When field=description,
+    // title is just the marker.
     const titleForRisk =
       field === "title"
         ? `${CLEANUP_PREFIX}${idx}_${payload.id}_${ts}_${payload.payload}`
@@ -188,7 +235,6 @@ async function runOnePayload(
         ? payload.payload
         : `INJECTION_TEST description ${idx}`;
 
-    // record the actual title used (for cleanup)
     result.title_used = titleForRisk;
 
     const createResult = await createRiskInProject(page, titleForRisk, {
@@ -209,8 +255,7 @@ async function runOnePayload(
     result.xss_events = events;
     result.xss_executed = events.some((e) => e.type === "dialog");
 
-    // ── Strict check 3: reflected XSS in DOM ──
-    // Only meaningful for XSS-type payloads
+    // ── Strict check 3: reflected XSS in real DOM (XSS payloads only) ──
     if (payload.type === "xss" && result.create_succeeded) {
       // Re-render the risks list and search for the title we just created
       const found = await searchRisk(page, titleForRisk).catch(() => false);
@@ -250,7 +295,6 @@ async function runOnePayload(
     return result;
   } catch (err) {
     result.create_error = (err as Error).message;
-    // Could be a 500 from the server propagated as an exception
     if (/5\d\d|server error|crashed/i.test(result.create_error)) {
       result.http_500_observed = true;
     }
@@ -464,9 +508,9 @@ router.post("/test-injection", async (req: Request, res: Response) => {
       match: !anyXssExec,
     };
     assertions.no_reflected_xss = {
-      expected: "No XSS payload appears unescaped in rendered DOM",
+      expected: "No XSS payload renders as actual HTML element in DOM",
       actual: anyReflectedXss
-        ? `REFLECTED — ${totalReflectedXss} payload(s) found raw in HTML`
+        ? `REFLECTED — ${totalReflectedXss} payload(s) produced executable DOM elements`
         : "clean",
       match: !anyReflectedXss,
     };
@@ -502,7 +546,6 @@ router.post("/test-injection", async (req: Request, res: Response) => {
     );
     const overallStatus: "success" | "failed" = allStrictPassed ? "success" : "failed";
 
-    // Take a wrap-up screenshot if anything went wrong
     if (overallStatus === "failed") {
       screenshotUrl = await captureAbortShot(context, `sec11_overall_fail_${username}`);
     }
