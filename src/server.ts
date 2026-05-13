@@ -8,6 +8,8 @@ import { withTimeout } from "./utils/retry";
 import { saveTestResult } from "./services/supabaseLogger";
 import { recordTestResult, saveAllureResult } from "./services/allureReporter";
 import { allureRouter } from "./services/allureRoutes";
+import testRateLimitRouter from "./routes/testRateLimit";
+
 
 import { performCreateRisk } from "./routes/createRisk";
 import { performEditRisk } from "./routes/editRisk";
@@ -38,6 +40,7 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use("/", testProjectIsolationRouter);
 app.use("/", testInjectionRouter);
+app.use("/", testRateLimitRouter);
 
 
 function authMiddleware(req: Request, res: Response, next: NextFunction): void {
