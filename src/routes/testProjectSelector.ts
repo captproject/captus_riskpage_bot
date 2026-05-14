@@ -309,7 +309,7 @@ router.post("/test-project-selector", async (req: Request, res: Response) => {
         total_duration_ms: Date.now() - overallStart,
         screenshot_url: screenshotUrl,
       };
-      if (context) await context.close().catch(() => {});
+      if (context) await (context as BrowserContext).close().catch(() => {});
       return await respond(res, 500, payload, overallStart);
     }
 
@@ -630,7 +630,7 @@ router.post("/test-project-selector", async (req: Request, res: Response) => {
       if (seededB) cleanupAttempted.b = await safeDelete(page, PROJECTS.B.code, seedTitleB);
       if (seededA) cleanupAttempted.a = await safeDelete(page, PROJECTS.A.code, seedTitleA);
     }
-    if (context) await context.close().catch(() => {});
+    if (context) await (context as BrowserContext).close().catch(() => {});
 
     const payload = {
       status: "error" as const,
