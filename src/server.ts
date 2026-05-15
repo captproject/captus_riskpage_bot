@@ -9,6 +9,8 @@ import { saveTestResult } from "./services/supabaseLogger";
 import { recordTestResult, saveAllureResult } from "./services/allureReporter";
 import { allureRouter } from "./services/allureRoutes";
 import testRateLimitRouter from "./routes/testRateLimit";
+import testRiskRegistryLoadRouter from "./routes/testRiskRegistryLoad";
+
 
 
 import { performCreateRisk } from "./routes/createRisk";
@@ -41,6 +43,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use("/", testProjectSelectorRouter);
 app.use("/", testInjectionRouter);
 app.use("/", testRateLimitRouter);
+app.use("/", testRiskRegistryLoadRouter);
 
 
 function authMiddleware(req: Request, res: Response, next: NextFunction): void {
