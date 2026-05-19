@@ -23,6 +23,8 @@ import { performAuditLog } from "./routes/auditLog";
 import { performLoginBot } from "./routes/loginBot";
 import { performSessionTermination } from "./routes/sessionTermination";
 import testInjectionRouter from "./routes/testInjection";
+import testChatMessageRouter from "./routes/testChatMessage";
+
 
 
 export const config: Config = {
@@ -44,6 +46,8 @@ app.use("/", testProjectSelectorRouter);
 app.use("/", testInjectionRouter);
 app.use("/", testRateLimitRouter);
 app.use("/", testRiskRegistryLoadRouter);
+app.use("/", testChatMessageRouter);
+
 
 
 function authMiddleware(req: Request, res: Response, next: NextFunction): void {
