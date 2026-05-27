@@ -11,8 +11,6 @@ import { allureRouter } from "./services/allureRoutes";
 import testRateLimitRouter from "./routes/testRateLimit";
 import testRiskRegistryLoadRouter from "./routes/testRiskRegistryLoad";
 
-
-
 import { performCreateRisk } from "./routes/createRisk";
 import { performEditRisk } from "./routes/editRisk";
 import { performDeleteRisk } from "./routes/deleteRisk";
@@ -24,6 +22,8 @@ import { performLoginBot } from "./routes/loginBot";
 import { performSessionTermination } from "./routes/sessionTermination";
 import testInjectionRouter from "./routes/testInjection";
 import testChatMessageRouter from "./routes/testChatMessage";
+import { performRiskIngestion } from "./routes/testRiskIngestion";
+import { performBulkOperations } from "./routes/testBulkOperations";
 
 
 
@@ -278,6 +278,23 @@ app.post("/audit-log", authMiddleware, async (req: Request, res: Response) => {
   } catch (err) {
     await saveTestResult("TC_Audit_Log", { status: "error", username: input.username, message: (err as Error).message, assertion_match: false }, {});
     recordTestResult("TC_Audit_Log", "Audit Tests", "error", (err as Error).message, startTime, undefined, undefined, { assertion_expected: "All 6 audit entries verified", assertion_actual: (err as Error).message, failure_type: "EXECUTION_ERROR" });
+    res.status(500).json({ status: "error", message: (err as Error).message });
+  }
+});
+app.post("/test-risk-ingestion", async (req, res) => {
+  try {
+    const result = await performRiskIngestion(req.body);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ status: "error", message: (err as Error).message });
+  }
+});
+
+app.post("/test-bulk-operations", async (req, res) => {
+  try {
+    const result = await performBulkOperations(req.body);
+    res.json(result);
+  } catch (err) {
     res.status(500).json({ status: "error", message: (err as Error).message });
   }
 });
