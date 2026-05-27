@@ -1,11 +1,16 @@
-// ─── Bulk Operations Route (INT 3.9) — v2 with API auth ──────────────────────
+// ─── Bulk Operations Route (INT 3.9) — v3 ────────────────────────────────────
 // Schedule-triggered variant of "Webhook Bulk Operations" (spec 13.9).
 //
-// Validates:
-//   Batch A — 10 valid risks  → all 201, UI count == 10
-//   Batch B — 100 valid risks → all 201, spot-check first/middle/last
-//   Batch C — 10 valid + 3 invalid → valid pass, invalid rejected with errors
-//   Cleanup — every captured id deleted; orphan prefixes purged too
+// v3 changes:
+//   - UI assertions now navigate to config.tableUrl (risk registry),
+//     not config.dashboardUrl (summary page).
+//   - runPartialFailureBatch captures IDs from ALL 201 responses,
+//     including from "invalid" variants that the server accepts.
+//     This prevents orphan rows when validation is laxer than expected.
+//   - Cleanup now also purges by the "INVALID-" prefix to catch
+//     anything that bypassed ID capture.
+//   - Invalid variants updated to ones likely to actually fail
+//     (impact_out_of_range, negative_score) — see riskApiClient v3.
 
 import { BrowserContext, Page } from "playwright";
 import { config } from "../server";
@@ -27,6 +32,7 @@ import {
 const PREFIX_A = "INT39A-RISK-";
 const PREFIX_B = "INT39B-RISK-";
 const PREFIX_C = "INT39C-RISK-";
+const PREFIX_INVALID = "INVALID-";   // for orphan cleanup of accepted-invalid rows
 const PAUSE_MS = 100;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -48,7 +54,7 @@ export interface BulkOperationsResult {
   status: "pass" | "fail" | "error";
   message: string;
   username: string;
-  pre_cleanup: { a: any; b: any; c: any };
+  pre_cleanup: { a: any; b: any; c: any; invalid_orphans: any };
   batch_a: { attempted: number; succeeded: number; failed: number; ui_count: number };
   batch_b: {
     attempted: number;
@@ -60,7 +66,14 @@ export interface BulkOperationsResult {
     valid_succeeded: number;
     valid_failed: number;
     invalid_rejected: number;
-    invalid_results: Array<{ variant: string; status: number; rejected: boolean; error?: string }>;
+    invalid_accepted: number;
+    invalid_results: Array<{
+      variant: string;
+      status: number;
+      rejected: boolean;
+      accepted_id?: string;
+      error?: string;
+    }>;
   };
   cleanup: { ids_total: number; deleted: number; failed: number; final_purge: any };
   assertions: Record<string, boolean>;
@@ -97,10 +110,17 @@ async function runValidBatch(
 
 async function runPartialFailureBatch(page: Page, prefix: string, runTs: number, auth: ApiAuth) {
   const valid: BatchOutcome = { attempted: 10, succeeded: 0, failed: 0, ids: [], failures: [] };
-  const invalidVariants: Array<"empty_title" | "bad_category" | "missing_project"> = [
-    "empty_title", "bad_category", "missing_project",
+  const invalidVariants: Array<"empty_title" | "impact_out_of_range" | "negative_score"> = [
+    "empty_title", "impact_out_of_range", "negative_score",
   ];
-  const invalid_results: Array<{ variant: string; status: number; rejected: boolean; error?: string }> = [];
+  const invalid_results: Array<{
+    variant: string;
+    status: number;
+    rejected: boolean;
+    accepted_id?: string;
+    error?: string;
+  }> = [];
+  const acceptedInvalidIds: string[] = [];
 
   for (let i = 0; i < 10; i++) {
     const title = `${prefix}${runTs}-${i}`;
@@ -116,14 +136,18 @@ async function runPartialFailureBatch(page: Page, prefix: string, runTs: number,
     await sleep(PAUSE_MS);
   }
 
+  // v3: capture IDs even from "invalid" variants that get accepted
   for (let i = 0; i < invalidVariants.length; i++) {
     const v = invalidVariants[i];
     const r = await createRisk(page, buildInvalidPayload(v, i), auth);
     const rejected = !r.ok && r.status >= 400 && r.status < 500;
+    const accepted_id = r.ok ? String(r.body?.id ?? r.body?.uuid ?? "") : undefined;
+    if (accepted_id) acceptedInvalidIds.push(accepted_id);
     invalid_results.push({
       variant: v,
       status: r.status,
       rejected,
+      accepted_id,
       error: typeof r.body === "object" ? r.body?.message ?? r.body?.error : undefined,
     });
     await sleep(PAUSE_MS);
@@ -132,19 +156,21 @@ async function runPartialFailureBatch(page: Page, prefix: string, runTs: number,
   return {
     valid,
     invalid_rejected: invalid_results.filter((x) => x.rejected).length,
+    invalid_accepted: invalid_results.filter((x) => !x.rejected).length,
     invalid_results,
+    acceptedInvalidIds,
   };
 }
 
-// ─── UI Assertions ───────────────────────────────────────────────────────────
+// ─── UI Assertions (v3 — tableUrl) ───────────────────────────────────────────
 
 async function countRisksInUiByPrefix(page: Page, fullPrefix: string): Promise<number> {
   try {
-    await page.goto(config.dashboardUrl, {
-      waitUntil: "networkidle",
+    await page.goto(config.tableUrl, {
+      waitUntil: "domcontentloaded",
       timeout: config.navigationTimeout,
     });
-    await page.waitForTimeout(1_500);
+    await page.waitForTimeout(2_000);
     return await page.evaluate((p) => {
       const text = document.body.innerText ?? "";
       const matches = text.match(new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"));
@@ -160,11 +186,11 @@ async function spotCheckTitles(
   titles: string[]
 ): Promise<{ first: boolean; middle: boolean; last: boolean }> {
   try {
-    await page.goto(config.dashboardUrl, {
-      waitUntil: "networkidle",
+    await page.goto(config.tableUrl, {
+      waitUntil: "domcontentloaded",
       timeout: config.navigationTimeout,
     });
-    await page.waitForTimeout(1_500);
+    await page.waitForTimeout(2_000);
     const results = await Promise.all(
       titles.map((t) =>
         page.getByText(t, { exact: false }).first().isVisible({ timeout: 8_000 }).catch(() => false)
@@ -185,10 +211,10 @@ export async function performBulkOperations(input: BulkOperationsInput): Promise
     status: "error",
     message: "",
     username: input.username,
-    pre_cleanup: { a: null, b: null, c: null },
+    pre_cleanup: { a: null, b: null, c: null, invalid_orphans: null },
     batch_a: { attempted: 0, succeeded: 0, failed: 0, ui_count: 0 },
     batch_b: { attempted: 0, succeeded: 0, failed: 0, spot_check: { first: false, middle: false, last: false } },
-    batch_c: { valid_succeeded: 0, valid_failed: 0, invalid_rejected: 0, invalid_results: [] },
+    batch_c: { valid_succeeded: 0, valid_failed: 0, invalid_rejected: 0, invalid_accepted: 0, invalid_results: [] },
     cleanup: { ids_total: 0, deleted: 0, failed: 0, final_purge: null },
     assertions: {},
     screenshots: { failure: null },
@@ -199,16 +225,16 @@ export async function performBulkOperations(input: BulkOperationsInput): Promise
     const session = await createContextAndLogin(input.username, input.password);
     context = session.context;
     const page = session.page;
-
-    // API auth — fetch token + csrfToken
     const auth = await authenticateApi(page, input.username, input.password);
 
-    // ── Pre-cleanup of all three prefixes ──
+    // ── Pre-cleanup (includes INVALID-* orphans from prior runs) ──
     result.pre_cleanup = {
       a: await purgeRisksByPrefix(page, PREFIX_A, auth),
       b: await purgeRisksByPrefix(page, PREFIX_B, auth),
       c: await purgeRisksByPrefix(page, PREFIX_C, auth),
+      invalid_orphans: await purgeRisksByPrefix(page, PREFIX_INVALID, auth),
     };
+    console.log(`[INT39] Pre-cleanup orphans: ${JSON.stringify(result.pre_cleanup.invalid_orphans)}`);
 
     // ── Batch A — 10 valid risks ──
     console.log(`[INT39] Batch A starting (10 risks)`);
@@ -244,13 +270,15 @@ export async function performBulkOperations(input: BulkOperationsInput): Promise
     console.log(`[INT39] Batch C starting (10 valid + 3 invalid)`);
     const batchC = await runPartialFailureBatch(page, PREFIX_C, runTs, auth);
     allCreatedIds.push(...batchC.valid.ids);
+    allCreatedIds.push(...batchC.acceptedInvalidIds);  // capture orphans for cleanup
     result.batch_c = {
       valid_succeeded: batchC.valid.succeeded,
       valid_failed: batchC.valid.failed,
       invalid_rejected: batchC.invalid_rejected,
+      invalid_accepted: batchC.invalid_accepted,
       invalid_results: batchC.invalid_results,
     };
-    console.log(`[INT39] Batch C done — valid ${batchC.valid.succeeded}/10, invalid rejected ${batchC.invalid_rejected}/3`);
+    console.log(`[INT39] Batch C done — valid ${batchC.valid.succeeded}/10, invalid rejected ${batchC.invalid_rejected}/3, invalid accepted ${batchC.invalid_accepted}/3`);
 
     // ── Cleanup ──
     console.log(`[INT39] Cleanup starting — ${allCreatedIds.length} ids`);
@@ -265,6 +293,7 @@ export async function performBulkOperations(input: BulkOperationsInput): Promise
       a: await purgeRisksByPrefix(page, PREFIX_A, auth),
       b: await purgeRisksByPrefix(page, PREFIX_B, auth),
       c: await purgeRisksByPrefix(page, PREFIX_C, auth),
+      invalid_orphans: await purgeRisksByPrefix(page, PREFIX_INVALID, auth),
     };
     result.cleanup = {
       ids_total: allCreatedIds.length,

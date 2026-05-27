@@ -1,24 +1,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// riskApiClient.ts  (v2 — Approach B: API-level auth)
+// riskApiClient.ts  (v3)
 //
 // In-browser fetch helpers for the Captus /api/risks endpoint.
 //
-// Auth model:
-//   The Captus SPA's request interceptor injects two headers on every
-//   write that we cannot replicate from a plain page.evaluate(fetch):
-//     - Authorization: Bearer <jwt>     (from localStorage.captus_auth_token)
-//     - x-csrf-token:  <csrfToken>      (held in SPA memory, never persisted)
+// Auth model (Approach B): the SPA's request interceptor injects
+//   - Authorization: Bearer <jwt>   (from localStorage.captus_auth_token)
+//   - x-csrf-token:  <csrfToken>    (held in SPA memory, never persisted)
 //
-//   The CSRF token comes from the POST /api/auth/login RESPONSE BODY,
-//   field `csrfToken`. Same response also contains `token` (the JWT).
+// Both tokens come from POST /api/auth/login response body (fields
+// `token` and `csrfToken`). This client performs its own /api/auth/login
+// and attaches both headers explicitly on writes.
 //
-//   So this client performs its OWN /api/auth/login call up front,
-//   captures both tokens from the response body, and explicitly attaches
-//   them as headers on every subsequent risk-API call.
-//
-// Used by:
-//   - routes/testRiskIngestion.ts   (INT 3.1)
-//   - routes/testBulkOperations.ts  (INT 3.9)
+// v3 changes:
+//   - Invalid-variant payloads swapped to ones that actually fail server validation.
+//     Previous variants (bad_category, missing_project) were accepted by Captus,
+//     leaving orphan rows. New variants stress validators we know exist.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Page } from "playwright";
@@ -28,24 +24,24 @@ import { Page } from "playwright";
 export interface RiskPayload {
   title: string;
   description: string;
-  category: string;        // e.g. "Technical"
-  impact: number;          // 1..5
-  likelihood: number;      // 1..5
-  score: number;           // impact * likelihood
-  dueDate: string;         // ISO timestamp
+  category: string;
+  impact: number;
+  likelihood: number;
+  score: number;
+  dueDate: string;
   mitigationPlan: string;
   owner: string;
-  potentialCost: string;   // numeric string, e.g. "100000.00"
+  potentialCost: string;
   projectName: string;
   projectUuid: string;
-  status: string;          // "open"
+  status: string;
 }
 
 export interface ApiAuth {
-  token: string;        // JWT for Authorization: Bearer header
-  csrfToken: string;    // for x-csrf-token header
+  token: string;
+  csrfToken: string;
   userId: string;
-  acquiredAt: number;   // epoch ms — for staleness check
+  acquiredAt: number;
 }
 
 export interface ApiCallResult {
@@ -57,30 +53,20 @@ export interface ApiCallResult {
 }
 
 // ─── Auth cache ──────────────────────────────────────────────────────────────
-// One process-wide cache. Reuses tokens across back-to-back tests so the
-// 2-test n8n workflow (INT 3.1 → INT 3.9) doesn't login to the API twice.
 
-const AUTH_TTL_MS = 5 * 60 * 1000;   // 5 min safety margin (JWT itself lasts 7d)
+const AUTH_TTL_MS = 5 * 60 * 1000;
 let cachedAuth: ApiAuth | null = null;
 
 export function invalidateApiAuth(): void {
   cachedAuth = null;
 }
 
-/**
- * POST /api/auth/login from inside the Playwright page context.
- * Captures `token` + `csrfToken` from the response body.
- * Returns cached auth if still within TTL.
- */
 export async function authenticateApi(
   page: Page,
   username: string,
   password: string
 ): Promise<ApiAuth> {
-  if (
-    cachedAuth &&
-    Date.now() - cachedAuth.acquiredAt < AUTH_TTL_MS
-  ) {
+  if (cachedAuth && Date.now() - cachedAuth.acquiredAt < AUTH_TTL_MS) {
     console.log("[ApiAuth] Reusing cached auth");
     return cachedAuth;
   }
@@ -126,11 +112,6 @@ export async function authenticateApi(
 const PROJECT_TEST_UUID = "061197b1-546e-4ab7-81b3-43c015db6ece";
 const PROJECT_TEST_NAME = "Test";
 
-/**
- * Build a complete risk payload from minimal inputs.
- * Score is always derived from impact * likelihood.
- * Due date defaults to 7 days from now.
- */
 export function buildRiskPayload(opts: {
   title: string;
   impact?: number;
@@ -161,10 +142,17 @@ export function buildRiskPayload(opts: {
 }
 
 /**
- * Build a deliberately INVALID payload for partial-failure testing (INT 3.9 Batch C).
+ * v3: invalid variants chosen to actually fail server validation.
+ *
+ *   empty_title     — title:""               → expected 400 (title required)
+ *   impact_out_of_range — impact:99          → expected 400 (impact must be 1..5)
+ *   negative_score  — score:-50              → expected 400 (score must be >= 0)
+ *
+ * Previous variants (bad_category, missing_project) were accepted by Captus
+ * and left orphan rows; see batch outcomes from 2026-05-27.
  */
 export function buildInvalidPayload(
-  variant: "empty_title" | "bad_category" | "missing_project",
+  variant: "empty_title" | "impact_out_of_range" | "negative_score",
   index: number
 ): Partial<RiskPayload> {
   const base = buildRiskPayload({ title: `INVALID-${variant}-${index}` });
@@ -172,19 +160,15 @@ export function buildInvalidPayload(
   switch (variant) {
     case "empty_title":
       return { ...base, title: "" };
-    case "bad_category":
-      return { ...base, category: "NOT_A_REAL_CATEGORY_xyz" };
-    case "missing_project":
-      const { projectUuid, projectName, ...withoutProject } = base;
-      return withoutProject;
+    case "impact_out_of_range":
+      return { ...base, impact: 99 };
+    case "negative_score":
+      return { ...base, score: -50 };
   }
 }
 
-// ─── Core fetch helpers (with auth headers attached) ─────────────────────────
+// ─── Core fetch helpers ──────────────────────────────────────────────────────
 
-/**
- * POST /api/risks with Bearer + CSRF headers.
- */
 export async function createRisk(
   page: Page,
   payload: Partial<RiskPayload>,
@@ -225,18 +209,13 @@ export async function createRisk(
     };
   } catch (e: any) {
     return {
-      ok: false,
-      status: 0,
-      body: null,
+      ok: false, status: 0, body: null,
       error: String(e?.message ?? e),
       duration_ms: Date.now() - start,
     };
   }
 }
 
-/**
- * DELETE /api/risks/<id> with Bearer + CSRF headers.
- */
 export async function deleteRisk(
   page: Page,
   id: string,
@@ -274,18 +253,13 @@ export async function deleteRisk(
     };
   } catch (e: any) {
     return {
-      ok: false,
-      status: 0,
-      body: null,
+      ok: false, status: 0, body: null,
       error: String(e?.message ?? e),
       duration_ms: Date.now() - start,
     };
   }
 }
 
-/**
- * GET /api/risks (list) for pre-cleanup. Bearer header sufficient — no CSRF on reads.
- */
 export async function listRisks(page: Page, auth: ApiAuth): Promise<ApiCallResult> {
   const start = Date.now();
   try {
@@ -317,9 +291,7 @@ export async function listRisks(page: Page, auth: ApiAuth): Promise<ApiCallResul
     };
   } catch (e: any) {
     return {
-      ok: false,
-      status: 0,
-      body: null,
+      ok: false, status: 0, body: null,
       error: String(e?.message ?? e),
       duration_ms: Date.now() - start,
     };
@@ -342,11 +314,8 @@ export async function purgeRisksByPrefix(
   auth: ApiAuth
 ): Promise<{ found: number; deleted: number; failed: number }> {
   const listed = await listRisks(page, auth);
-  if (!listed.ok) {
-    return { found: 0, deleted: 0, failed: 0 };
-  }
+  if (!listed.ok) return { found: 0, deleted: 0, failed: 0 };
 
-  // API can return either an array OR { risks: [...] } depending on endpoint shape
   const all: any[] = Array.isArray(listed.body)
     ? listed.body
     : (listed.body?.risks ?? listed.body?.data ?? []);

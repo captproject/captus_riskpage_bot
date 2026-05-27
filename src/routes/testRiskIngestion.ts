@@ -1,14 +1,12 @@
-// ─── Risk Ingestion Route (INT 3.1) — v2 with API auth ───────────────────────
+// ─── Risk Ingestion Route (INT 3.1) — v3 ─────────────────────────────────────
 // Schedule-triggered variant of "Risk Ingestion via Webhook" (spec 13.1).
 //
-// Lifecycle:
-//   1. createContextAndLogin → Playwright login + company "demo" + project "Test"
-//   2. authenticateApi → fetch fresh JWT + csrfToken via /api/auth/login
-//   3. Pre-cleanup: purge orphan INT3-RISK-* rows
-//   4. POST /api/risks with Bearer + x-csrf-token → expect 201
-//   5. UI verify: risk visible in /risks registry
-//   6. Audit log: entry exists with action=Create, entity=Risk
-//   7. Cleanup: DELETE /api/risks/<id>
+// v3 changes:
+//   - UI verification now navigates to config.tableUrl (the actual risk
+//     registry) instead of config.dashboardUrl (a summary page that has
+//     no risk list). Previous version was looking at the wrong page.
+//   - UI verification now includes a search-by-title step + one retry
+//     with hard reload to tolerate UI cache lag.
 
 import { BrowserContext, Page } from "playwright";
 import { config } from "../server";
@@ -53,6 +51,54 @@ export interface RiskIngestionResult {
   steps_summary: string;
   steps: RiskIngestionStep[];
   screenshots: { failure: string | null };
+}
+
+// ─── UI Verification (v3 — tableUrl + search + retry) ────────────────────────
+
+async function searchRiskInTable(page: Page, title: string): Promise<boolean> {
+  try {
+    // Try the search input on the table page if it exists
+    const searchInput = page
+      .getByPlaceholder(/search/i)
+      .or(page.locator('input[type="search"]'))
+      .or(page.locator('[data-testid="input-search"]'))
+      .first();
+    const visible = await searchInput.isVisible({ timeout: 3_000 }).catch(() => false);
+    if (visible) {
+      await searchInput.fill(title);
+      await page.waitForTimeout(1_500);
+    }
+    // Whether or not search was filled, look for the title anywhere on the page
+    return await page
+      .getByText(title, { exact: false })
+      .first()
+      .isVisible({ timeout: 8_000 })
+      .catch(() => false);
+  } catch {
+    return false;
+  }
+}
+
+async function verifyRiskInUI(page: Page, title: string): Promise<boolean> {
+  // First attempt — normal navigation
+  try {
+    await page.goto(config.tableUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: config.navigationTimeout,
+    });
+    await page.waitForTimeout(2_000);
+    const found = await searchRiskInTable(page, title);
+    if (found) return true;
+
+    // Second attempt — hard reload (defeats cache)
+    console.log("[INT31] UI verify miss — retrying with reload");
+    await page.reload({ waitUntil: "domcontentloaded", timeout: config.navigationTimeout });
+    await page.waitForTimeout(2_000);
+    return await searchRiskInTable(page, title);
+  } catch (err) {
+    console.log(`[INT31] verifyRiskInUI error: ${(err as Error).message}`);
+    return false;
+  }
 }
 
 // ─── Audit Log Helpers (mirrors auditLog.ts) ─────────────────────────────────
@@ -121,23 +167,6 @@ async function verifyCreateInAuditLog(page: Page, title: string): Promise<boolea
   }
 }
 
-async function verifyRiskInUI(page: Page, title: string): Promise<boolean> {
-  try {
-    await page.goto(`${config.dashboardUrl.replace(/\/$/, "")}`, {
-      waitUntil: "networkidle",
-      timeout: config.navigationTimeout,
-    });
-    await page.waitForTimeout(1_500);
-    return await page
-      .getByText(title, { exact: false })
-      .first()
-      .isVisible({ timeout: 10_000 })
-      .catch(() => false);
-  } catch {
-    return false;
-  }
-}
-
 // ─── Main Function ───────────────────────────────────────────────────────────
 
 export async function performRiskIngestion(input: RiskIngestionInput): Promise<RiskIngestionResult> {
@@ -158,12 +187,9 @@ export async function performRiskIngestion(input: RiskIngestionInput): Promise<R
   let context: BrowserContext | null = null;
 
   try {
-    // Step 0a: Playwright login (UI side)
     const session = await createContextAndLogin(input.username, input.password);
     context = session.context;
     const page = session.page;
-
-    // Step 0b: API login — fetch token + csrfToken from /api/auth/login
     const auth = await authenticateApi(page, input.username, input.password);
 
     // ── Step 1: Pre-cleanup ──
@@ -202,7 +228,7 @@ export async function performRiskIngestion(input: RiskIngestionInput): Promise<R
       name: "ui_verify",
       status: uiVisible ? "pass" : "fail",
       duration_ms: Date.now() - t3,
-      detail: { searched_title: riskTitle },
+      detail: { searched_title: riskTitle, page: config.tableUrl },
     });
 
     // ── Step 4: Audit log verification ──
@@ -246,15 +272,12 @@ export async function performRiskIngestion(input: RiskIngestionInput): Promise<R
     result.status = "error";
     result.message = (err as Error).message;
     console.log(`[INT31] Error: ${result.message}`);
-    // If the auth itself failed, drop the cache so the next test re-tries cleanly
     if (result.message.toLowerCase().includes("api login")) invalidateApiAuth();
     return result;
   } finally {
     await safeClose(context);
   }
 }
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function finalize(result: RiskIngestionResult, message: string): RiskIngestionResult {
   result.passed = result.steps.filter((s) => s.status === "pass").length;
