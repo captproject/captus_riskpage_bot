@@ -1,4 +1,4 @@
-// ─── Bulk Operations Route (INT 3.9) — matches project architecture ──────────
+// ─── Bulk Operations Route (INT 3.9) — v2 with API auth ──────────────────────
 // Schedule-triggered variant of "Webhook Bulk Operations" (spec 13.9).
 //
 // Validates:
@@ -15,10 +15,13 @@ import { captureFailure } from "../utils/screenshot";
 import {
   buildRiskPayload,
   buildInvalidPayload,
+  authenticateApi,
   createRisk,
   deleteRisk,
   purgeRisksByPrefix,
   sleep,
+  invalidateApiAuth,
+  ApiAuth,
 } from "../services/riskApiClient";
 
 const PREFIX_A = "INT39A-RISK-";
@@ -70,13 +73,14 @@ async function runValidBatch(
   page: Page,
   prefix: string,
   runTs: number,
-  count: number
+  count: number,
+  auth: ApiAuth
 ): Promise<BatchOutcome> {
   const out: BatchOutcome = { attempted: count, succeeded: 0, failed: 0, ids: [], failures: [] };
   for (let i = 0; i < count; i++) {
     const title = `${prefix}${runTs}-${i}`;
     const payload = buildRiskPayload({ title });
-    const r = await createRisk(page, payload);
+    const r = await createRisk(page, payload, auth);
     if (r.ok) {
       const id = String(r.body?.id ?? r.body?.uuid ?? "");
       if (id) out.ids.push(id);
@@ -91,7 +95,7 @@ async function runValidBatch(
   return out;
 }
 
-async function runPartialFailureBatch(page: Page, prefix: string, runTs: number) {
+async function runPartialFailureBatch(page: Page, prefix: string, runTs: number, auth: ApiAuth) {
   const valid: BatchOutcome = { attempted: 10, succeeded: 0, failed: 0, ids: [], failures: [] };
   const invalidVariants: Array<"empty_title" | "bad_category" | "missing_project"> = [
     "empty_title", "bad_category", "missing_project",
@@ -100,7 +104,7 @@ async function runPartialFailureBatch(page: Page, prefix: string, runTs: number)
 
   for (let i = 0; i < 10; i++) {
     const title = `${prefix}${runTs}-${i}`;
-    const r = await createRisk(page, buildRiskPayload({ title }));
+    const r = await createRisk(page, buildRiskPayload({ title }), auth);
     if (r.ok) {
       const id = String(r.body?.id ?? r.body?.uuid ?? "");
       if (id) valid.ids.push(id);
@@ -114,7 +118,7 @@ async function runPartialFailureBatch(page: Page, prefix: string, runTs: number)
 
   for (let i = 0; i < invalidVariants.length; i++) {
     const v = invalidVariants[i];
-    const r = await createRisk(page, buildInvalidPayload(v, i));
+    const r = await createRisk(page, buildInvalidPayload(v, i), auth);
     const rejected = !r.ok && r.status >= 400 && r.status < 500;
     invalid_results.push({
       variant: v,
@@ -196,16 +200,19 @@ export async function performBulkOperations(input: BulkOperationsInput): Promise
     context = session.context;
     const page = session.page;
 
+    // API auth — fetch token + csrfToken
+    const auth = await authenticateApi(page, input.username, input.password);
+
     // ── Pre-cleanup of all three prefixes ──
     result.pre_cleanup = {
-      a: await purgeRisksByPrefix(page, PREFIX_A),
-      b: await purgeRisksByPrefix(page, PREFIX_B),
-      c: await purgeRisksByPrefix(page, PREFIX_C),
+      a: await purgeRisksByPrefix(page, PREFIX_A, auth),
+      b: await purgeRisksByPrefix(page, PREFIX_B, auth),
+      c: await purgeRisksByPrefix(page, PREFIX_C, auth),
     };
 
     // ── Batch A — 10 valid risks ──
     console.log(`[INT39] Batch A starting (10 risks)`);
-    const batchA = await runValidBatch(page, PREFIX_A, runTs, 10);
+    const batchA = await runValidBatch(page, PREFIX_A, runTs, 10, auth);
     allCreatedIds.push(...batchA.ids);
     const uiCountA = await countRisksInUiByPrefix(page, `${PREFIX_A}${runTs}-`);
     result.batch_a = {
@@ -218,7 +225,7 @@ export async function performBulkOperations(input: BulkOperationsInput): Promise
 
     // ── Batch B — 100 valid risks ──
     console.log(`[INT39] Batch B starting (100 risks)`);
-    const batchB = await runValidBatch(page, PREFIX_B, runTs, 100);
+    const batchB = await runValidBatch(page, PREFIX_B, runTs, 100, auth);
     allCreatedIds.push(...batchB.ids);
     const spotCheckB = await spotCheckTitles(page, [
       `${PREFIX_B}${runTs}-0`,
@@ -235,7 +242,7 @@ export async function performBulkOperations(input: BulkOperationsInput): Promise
 
     // ── Batch C — partial failure ──
     console.log(`[INT39] Batch C starting (10 valid + 3 invalid)`);
-    const batchC = await runPartialFailureBatch(page, PREFIX_C, runTs);
+    const batchC = await runPartialFailureBatch(page, PREFIX_C, runTs, auth);
     allCreatedIds.push(...batchC.valid.ids);
     result.batch_c = {
       valid_succeeded: batchC.valid.succeeded,
@@ -250,14 +257,14 @@ export async function performBulkOperations(input: BulkOperationsInput): Promise
     let cleanupDeleted = 0;
     let cleanupFailed = 0;
     for (const id of allCreatedIds) {
-      const d = await deleteRisk(page, id);
+      const d = await deleteRisk(page, id, auth);
       if (d.ok) cleanupDeleted++; else cleanupFailed++;
       await sleep(50);
     }
     const finalPurge = {
-      a: await purgeRisksByPrefix(page, PREFIX_A),
-      b: await purgeRisksByPrefix(page, PREFIX_B),
-      c: await purgeRisksByPrefix(page, PREFIX_C),
+      a: await purgeRisksByPrefix(page, PREFIX_A, auth),
+      b: await purgeRisksByPrefix(page, PREFIX_B, auth),
+      c: await purgeRisksByPrefix(page, PREFIX_C, auth),
     };
     result.cleanup = {
       ids_total: allCreatedIds.length,
@@ -293,6 +300,7 @@ export async function performBulkOperations(input: BulkOperationsInput): Promise
     result.status = "error";
     result.message = (err as Error).message;
     console.log(`[INT39] Error: ${result.message}`);
+    if (result.message.toLowerCase().includes("api login")) invalidateApiAuth();
     return result;
   } finally {
     await safeClose(context);

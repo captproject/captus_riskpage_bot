@@ -1,17 +1,14 @@
-// ─── Risk Ingestion Route (INT 3.1) — matches project architecture ────────────
+// ─── Risk Ingestion Route (INT 3.1) — v2 with API auth ───────────────────────
 // Schedule-triggered variant of "Risk Ingestion via Webhook" (spec 13.1).
 //
 // Lifecycle:
-//   1. createContextAndLogin → login + company "demo" + project "Test"
-//   2. Pre-cleanup: purge orphan INT3-RISK-* rows
-//   3. POST /api/risks via in-browser fetch → expect 201 + id
-//   4. UI verify: risk visible in /risks registry
-//   5. Audit log: entry exists with action=Create, entity=Risk, title matches
-//      (relaxed — user JWT, not webhook key, so actor_type='agent' not asserted)
-//   6. Cleanup: DELETE /api/risks/<id>
-//
-// Auth model: in-browser fetch inherits JWT (localStorage), session cookie
-// (HttpOnly), and CSRF response-header token from the live SPA session.
+//   1. createContextAndLogin → Playwright login + company "demo" + project "Test"
+//   2. authenticateApi → fetch fresh JWT + csrfToken via /api/auth/login
+//   3. Pre-cleanup: purge orphan INT3-RISK-* rows
+//   4. POST /api/risks with Bearer + x-csrf-token → expect 201
+//   5. UI verify: risk visible in /risks registry
+//   6. Audit log: entry exists with action=Create, entity=Risk
+//   7. Cleanup: DELETE /api/risks/<id>
 
 import { BrowserContext, Page } from "playwright";
 import { config } from "../server";
@@ -20,9 +17,11 @@ import { safeClose } from "../services/browserManager";
 import { captureFailure } from "../utils/screenshot";
 import {
   buildRiskPayload,
+  authenticateApi,
   createRisk,
   deleteRisk,
   purgeRisksByPrefix,
+  invalidateApiAuth,
 } from "../services/riskApiClient";
 
 const TITLE_PREFIX = "INT3-RISK-";
@@ -56,7 +55,7 @@ export interface RiskIngestionResult {
   screenshots: { failure: string | null };
 }
 
-// ─── Audit Log Helpers (mirrors auditLog.ts pattern) ─────────────────────────
+// ─── Audit Log Helpers (mirrors auditLog.ts) ─────────────────────────────────
 
 async function navigateToAuditTrail(page: Page): Promise<void> {
   console.log("[INT31] Navigating to audit trail");
@@ -159,14 +158,17 @@ export async function performRiskIngestion(input: RiskIngestionInput): Promise<R
   let context: BrowserContext | null = null;
 
   try {
-    // Step 0: Login + company + project (all bundled by createContextAndLogin)
+    // Step 0a: Playwright login (UI side)
     const session = await createContextAndLogin(input.username, input.password);
     context = session.context;
     const page = session.page;
 
+    // Step 0b: API login — fetch token + csrfToken from /api/auth/login
+    const auth = await authenticateApi(page, input.username, input.password);
+
     // ── Step 1: Pre-cleanup ──
     const t1 = Date.now();
-    const purge = await purgeRisksByPrefix(page, TITLE_PREFIX);
+    const purge = await purgeRisksByPrefix(page, TITLE_PREFIX, auth);
     result.steps.push({
       name: "pre_cleanup",
       status: "pass",
@@ -177,7 +179,7 @@ export async function performRiskIngestion(input: RiskIngestionInput): Promise<R
     // ── Step 2: Create risk via API ──
     const t2 = Date.now();
     const payload = buildRiskPayload({ title: riskTitle, impact: 3, likelihood: 4 });
-    const create = await createRisk(page, payload);
+    const create = await createRisk(page, payload, auth);
     const createStep: RiskIngestionStep = {
       name: "api_create_risk",
       status: create.ok ? "pass" : "fail",
@@ -216,7 +218,7 @@ export async function performRiskIngestion(input: RiskIngestionInput): Promise<R
     // ── Step 5: Cleanup ──
     const t5 = Date.now();
     const del = result.risk_id
-      ? await deleteRisk(page, result.risk_id)
+      ? await deleteRisk(page, result.risk_id, auth)
       : { ok: false, status: 0, body: null, duration_ms: 0 };
     result.steps.push({
       name: "cleanup",
@@ -244,6 +246,8 @@ export async function performRiskIngestion(input: RiskIngestionInput): Promise<R
     result.status = "error";
     result.message = (err as Error).message;
     console.log(`[INT31] Error: ${result.message}`);
+    // If the auth itself failed, drop the cache so the next test re-tries cleanly
+    if (result.message.toLowerCase().includes("api login")) invalidateApiAuth();
     return result;
   } finally {
     await safeClose(context);
