@@ -10,7 +10,7 @@
 //   - Cleanup now also purges by the "INVALID-" prefix to catch
 //     anything that bypassed ID capture.
 //   - Invalid variants updated to ones likely to actually fail
-//     (impact_out_of_range, negative_score) — see riskApiClient v3.
+//     (impact_out_of_range, likelihood_out_of_range) — see riskApiClient v4.
 
 import { BrowserContext, Page } from "playwright";
 import { config } from "../server";
@@ -110,8 +110,8 @@ async function runValidBatch(
 
 async function runPartialFailureBatch(page: Page, prefix: string, runTs: number, auth: ApiAuth) {
   const valid: BatchOutcome = { attempted: 10, succeeded: 0, failed: 0, ids: [], failures: [] };
-  const invalidVariants: Array<"empty_title" | "impact_out_of_range" | "negative_score"> = [
-    "empty_title", "impact_out_of_range", "negative_score",
+  const invalidVariants: Array<"empty_title" | "impact_out_of_range" | "likelihood_out_of_range"> = [
+    "empty_title", "impact_out_of_range", "likelihood_out_of_range",
   ];
   const invalid_results: Array<{
     variant: string;

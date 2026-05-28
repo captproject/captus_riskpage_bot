@@ -142,17 +142,20 @@ export function buildRiskPayload(opts: {
 }
 
 /**
- * v3: invalid variants chosen to actually fail server validation.
+ * v4: invalid variants — all confirmed or expected to fail server validation.
  *
- *   empty_title     — title:""               → expected 400 (title required)
- *   impact_out_of_range — impact:99          → expected 400 (impact must be 1..5)
- *   negative_score  — score:-50              → expected 400 (score must be >= 0)
+ *   empty_title             — title:""        → 400 (title required)         ✅ confirmed 2026-05-27
+ *   impact_out_of_range     — impact:99       → 400 (impact must be 1..5)    ✅ confirmed 2026-05-27
+ *   likelihood_out_of_range — likelihood:99   → 400 (mirror of impact rule)  expected
  *
- * Previous variants (bad_category, missing_project) were accepted by Captus
- * and left orphan rows; see batch outcomes from 2026-05-27.
+ * Variants tried and accepted by Captus (DO NOT REUSE without server fix):
+ *   - bad_category        (category: arbitrary string)  → 201
+ *   - missing_project     (projectUuid omitted)         → 201
+ *   - negative_score      (score: -50)                  → 201
+ * These represent real product validation gaps; see findings log.
  */
 export function buildInvalidPayload(
-  variant: "empty_title" | "impact_out_of_range" | "negative_score",
+  variant: "empty_title" | "impact_out_of_range" | "likelihood_out_of_range",
   index: number
 ): Partial<RiskPayload> {
   const base = buildRiskPayload({ title: `INVALID-${variant}-${index}` });
@@ -162,8 +165,8 @@ export function buildInvalidPayload(
       return { ...base, title: "" };
     case "impact_out_of_range":
       return { ...base, impact: 99 };
-    case "negative_score":
-      return { ...base, score: -50 };
+    case "likelihood_out_of_range":
+      return { ...base, likelihood: 99 };
   }
 }
 
