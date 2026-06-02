@@ -33,6 +33,31 @@ const ERROR_KEYWORDS = [
   "failed", "denied", "unauthorized", "error",
 ];
 
+// ─── Empty-Field Validation (TC 1.3) ──────────────────────────────────────────
+// Exact inline messages the Captus login form renders on empty/invalid submit.
+const VALIDATION_MESSAGES = {
+  email: "Please enter a valid email address",
+  password: "Password is required",
+};
+
+// Polls the page body for up to `timeoutMs` until one of the expected validation
+// messages appears, then returns the body text. React renders these a beat after
+// the Sign In click, so a fixed wait isn't reliable.
+async function waitForValidation(
+  page: Page,
+  expected: string[],
+  timeoutMs = 6_000
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let body = "";
+  while (Date.now() < deadline) {
+    body = await page.evaluate(() => document.body.innerText).catch(() => "");
+    if (expected.some((m) => body.includes(m))) return body;
+    await page.waitForTimeout(300);
+  }
+  return body;
+}
+
 async function uploadLoginScreenshot(buffer: Buffer, username: string, status: string): Promise<string | null> {
   if (!config.supabaseUrl || !config.supabaseKey) return null;
   const sanitizedUsername = username.replace(/[^a-zA-Z0-9]/g, "_");
@@ -64,29 +89,40 @@ export async function performLoginBot(input: LoginBotInput): Promise<LoginBotRes
     context.setDefaultTimeout(config.navigationTimeout);
     const page: Page = await context.newPage();
 
+    // Treat null / undefined / whitespace-only as "empty" — these are the 1.3 rows.
+    const emailEmpty = !username || String(username).trim() === "";
+    const passwordEmpty = !password || String(password).trim() === "";
+    const isEmptyFieldScenario = emailEmpty || passwordEmpty;
+
     await page.goto(config.loginUrl, { waitUntil: "networkidle", timeout: 60_000 });
     await page.waitForSelector('input[name="email"]', { state: "visible", timeout: 15_000 });
     await page.waitForTimeout(5_000);
 
-    await page.evaluate((email) => {
-      const input = document.querySelector('input[name="email"]') as HTMLInputElement;
-      if (input) {
-        const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-        if (s) s.call(input, email);
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-    }, username);
+    // Fill email ONLY when provided — leaving it blank is what triggers validation.
+    if (!emailEmpty) {
+      await page.evaluate((email) => {
+        const input = document.querySelector('input[name="email"]') as HTMLInputElement;
+        if (input) {
+          const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+          if (s) s.call(input, email);
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      }, username);
+    }
 
-    await page.evaluate((pass) => {
-      const input = document.querySelector('input[name="password"]') as HTMLInputElement;
-      if (input) {
-        const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-        if (s) s.call(input, pass);
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-    }, password);
+    // Fill password ONLY when provided.
+    if (!passwordEmpty) {
+      await page.evaluate((pass) => {
+        const input = document.querySelector('input[name="password"]') as HTMLInputElement;
+        if (input) {
+          const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+          if (s) s.call(input, pass);
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      }, password);
+    }
 
     await page.evaluate(() => {
       const btn = document.querySelector('button[data-testid="button-login"]') as HTMLButtonElement;
@@ -106,7 +142,43 @@ export async function performLoginBot(input: LoginBotInput): Promise<LoginBotRes
     let statusActual = "";
     let assertionMatch: "pass" | "fail" = "fail";
 
-    if (!stillOnLogin) {
+    if (isEmptyFieldScenario) {
+      // ─── TC 1.3: Empty-field validation ──────────────────────────────────
+      const expected: string[] = [];
+      if (emailEmpty) expected.push(VALIDATION_MESSAGES.email);
+      if (passwordEmpty) expected.push(VALIDATION_MESSAGES.password);
+
+      const body = await waitForValidation(page, expected);
+      const emailMsgShown = body.includes(VALIDATION_MESSAGES.email);
+      const passwordMsgShown = body.includes(VALIDATION_MESSAGES.password);
+
+      const detected: string[] = [];
+      if (emailMsgShown) detected.push(VALIDATION_MESSAGES.email);
+      if (passwordMsgShown) detected.push(VALIDATION_MESSAGES.password);
+
+      // Pass = submission was blocked (still on /login) AND the right message showed.
+      // When BOTH fields are empty the form surfaces the email error first, so we
+      // require the email message and treat the password message as a bonus.
+      let validationPass: boolean;
+      if (emailEmpty) {
+        validationPass = stillOnLogin && emailMsgShown;
+      } else {
+        validationPass = stillOnLogin && passwordMsgShown;
+      }
+
+      statusExpected = `Form validation blocks submission — ${expected.join(" + ")}`;
+      statusActual = !stillOnLogin
+        ? "FAIL — form submitted (left /login); validation did NOT block"
+        : detected.length
+          ? `Validation shown — ${detected.join(" + ")}`
+          : "Stayed on /login but no validation message detected";
+
+      assertionMatch = validationPass ? "pass" : "fail";
+      status = "failed"; // login never succeeds in an empty-field scenario — expected
+      message = validationPass
+        ? `Empty-field validation working — ${detected.join(" + ")}`
+        : `Empty-field validation issue — expected [${expected.join(" + ")}], got: ${statusActual}`;
+    } else if (!stillOnLogin) {
       const landingPage = new URL(currentUrl).pathname;
       const assertionResults: string[] = [];
       let allPassed = true;
