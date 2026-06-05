@@ -11,6 +11,7 @@ import { allureRouter } from "./services/allureRoutes";
 import testRateLimitRouter from "./routes/testRateLimit";
 import testRiskRegistryLoadRouter from "./routes/testRiskRegistryLoad";
 
+
 import { performCreateRisk } from "./routes/createRisk";
 import { performEditRisk } from "./routes/editRisk";
 import { performDeleteRisk } from "./routes/deleteRisk";
@@ -24,6 +25,8 @@ import testInjectionRouter from "./routes/testInjection";
 import testChatMessageRouter from "./routes/testChatMessage";
 import { performRiskIngestion } from "./routes/testRiskIngestion";
 import { performBulkOperations } from "./routes/testBulkOperations";
+import getCurrentUserRouter from "./routes/getCurrentUser";
+
 
 
 
@@ -47,6 +50,8 @@ app.use("/", testInjectionRouter);
 app.use("/", testRateLimitRouter);
 app.use("/", testRiskRegistryLoadRouter);
 app.use("/", testChatMessageRouter);
+app.use("/", getCurrentUserRouter);
+
 
 
 
