@@ -302,11 +302,16 @@ app.post("/test-bulk-operations", async (req, res) => {
 // ─── REPLACE ONLY THE /login-v2 ROUTE IN src/server.ts ─────────────────────────
 
 app.post("/login-v2", authMiddleware, async (req: Request, res: Response) => {
-  const input = req.body;
-  if (!input.username || !input.password) {
+const input = req.body ?? {};
+  // Empty / null username or password is a VALID input here — it IS the TC 1.3
+  // empty-field scenario. Only reject a body missing BOTH keys entirely.
+  if (!("username" in input) && !("password" in input)) {
     res.status(400).json({ status: "error", message: "Missing: username, password" }); return;
   }
-  const startTime = Date.now();
+  // Normalize null → "" so performLoginBot always gets strings (it treats "" as empty).
+  input.username = input.username ?? "";
+  input.password = input.password ?? "";
+    const startTime = Date.now();
   try {
     const result = await executionQueue.add(() =>
       withTimeout(() => performLoginBot(input), config.executionTimeout, "login-v2")
