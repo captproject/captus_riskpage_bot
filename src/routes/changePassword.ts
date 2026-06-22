@@ -52,26 +52,35 @@ async function openUserMenu(page: Page): Promise<void> {
     .locator("div.rounded-full span.text-white")
     .filter({ hasText: /^[A-Z]{1,2}$/ })
     .first();
-  await avatar.waitFor({ state: "visible", timeout: 8_000 });
-  await avatar.click();
-  await page.waitForTimeout(1_000);
+  const anyItem = page
+    .locator('[data-testid="menu-item-change-password"]')
+    .or(page.getByRole("menuitem", { name: /sign out/i }));
+  // Click, then CONFIRM the dropdown actually opened. Retry the click if it
+  // didn't (e.g. a lingering toast intercepted it) — but never re-click an
+  // already-open menu, which would toggle it shut.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await avatar.waitFor({ state: "visible", timeout: 8_000 });
+    await avatar.click();
+    const opened = await anyItem
+      .first()
+      .waitFor({ state: "visible", timeout: 4_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (opened) return;
+    await page.waitForTimeout(800);
+  }
 }
 
 async function performLogout(page: Page): Promise<boolean> {
   try {
     await openUserMenu(page);
-    // Logout entry varies by build: a "Sign out" span (current UI) or a
-    // menu-item-logout testid (older). Try testid, then text, then reopen+text.
-    const byTestId = page.locator('[data-testid="menu-item-logout"]');
-    const byText = page.getByText("Sign out", { exact: true });
-    if (await byTestId.first().isVisible().catch(() => false)) {
-      await byTestId.first().click();
-    } else if (await byText.first().isVisible().catch(() => false)) {
-      await byText.first().click();
-    } else {
-      await openUserMenu(page); // menu may have collapsed — reopen and retry
-      await byText.first().click({ timeout: 5_000 });
-    }
+    // Sign out is a Radix menuitem (same structure as Change Password).
+    const signOut = page
+      .getByRole("menuitem", { name: /sign out/i })
+      .or(page.locator('[data-testid="menu-item-logout"]'))
+      .or(page.getByText(/^sign out$/i));
+    await signOut.first().waitFor({ state: "visible", timeout: 8_000 });
+    await signOut.first().click();
     // Reliable signal: the login form reappears (don't rely on URL alone).
     const backToLogin = await page
       .locator('input[name="email"]')
