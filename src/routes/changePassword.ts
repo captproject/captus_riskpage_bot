@@ -60,12 +60,26 @@ async function openUserMenu(page: Page): Promise<void> {
 async function performLogout(page: Page): Promise<boolean> {
   try {
     await openUserMenu(page);
-    const logoutBtn = page.locator('[data-testid="menu-item-logout"]');
-    await logoutBtn.waitFor({ state: "visible", timeout: 5_000 });
-    await logoutBtn.click();
-    await page.waitForTimeout(3_000);
+    // Logout entry varies by build: a "Sign out" span (current UI) or a
+    // menu-item-logout testid (older). Try testid, then text, then reopen+text.
+    const byTestId = page.locator('[data-testid="menu-item-logout"]');
+    const byText = page.getByText("Sign out", { exact: true });
+    if (await byTestId.first().isVisible().catch(() => false)) {
+      await byTestId.first().click();
+    } else if (await byText.first().isVisible().catch(() => false)) {
+      await byText.first().click();
+    } else {
+      await openUserMenu(page); // menu may have collapsed — reopen and retry
+      await byText.first().click({ timeout: 5_000 });
+    }
+    // Reliable signal: the login form reappears (don't rely on URL alone).
+    const backToLogin = await page
+      .locator('input[name="email"]')
+      .waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
     const url = page.url();
-    return url.includes("/login") || url.includes("/sign-in");
+    return backToLogin || url.includes("/login") || url.includes("/sign-in");
   } catch (err) {
     console.log(`[PwChange] Logout failed: ${(err as Error).message}`);
     return false;
