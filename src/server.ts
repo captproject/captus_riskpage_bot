@@ -11,7 +11,7 @@ import { allureRouter } from "./services/allureRoutes";
 import testRateLimitRouter from "./routes/testRateLimit";
 import testRiskRegistryLoadRouter from "./routes/testRiskRegistryLoad";
 
-
+import { performChangePassword } from "./routes/changePassword";
 import { performCreateRisk } from "./routes/createRisk";
 import { performEditRisk } from "./routes/editRisk";
 import { performDeleteRisk } from "./routes/deleteRisk";
@@ -491,7 +491,34 @@ app.get("/health", (_req: Request, res: Response) => {
     timestamp: new Date().toISOString(),
   });
 });
-
+// ─── POST /change-password (TC 1.6) ──────────────────────────────────────────
+app.post("/change-password", authMiddleware, async (req: Request, res: Response) => {
+  const input = req.body;
+  if (!input.username || !input.current_password || !input.new_password) {
+    res.status(400).json({ status: "error", message: "Missing: username, current_password, new_password" }); return;
+  }
+  const startTime = Date.now();
+  try {
+    const result = await executionQueue.add(() =>
+      withTimeout(() => performChangePassword(input), 300_000, "change-password")
+    );
+    await saveTestResult("TC_Password_Change", {
+      status: result.status, username: result.username, message: result.message,
+      assertion_expected: "Profile menu; Change Password modal; success toast; session active; logout; NEW login succeeds; OLD login rejected",
+      assertion_actual: result.assertion_actual,
+      assertion_match: result.assertion_match === "pass",
+      screenshot_failure: result.screenshot_url,
+    }, { total_steps: result.total_steps, passed: result.passed, failed: result.failed, steps: result.steps });
+    recordTestResult("TC_Password_Change", "Auth Tests",
+      result.status === "passed" ? "success" : result.status === "error" ? "error" : "failed",
+      result.message, startTime, undefined, result.screenshot_url || undefined,
+      { assertion_expected: "Password change end-to-end", assertion_actual: result.assertion_actual, username: result.username });
+    res.status(result.status === "error" ? 500 : 200).json(result);
+  } catch (err) {
+    await saveTestResult("TC_Password_Change", { status: "error", username: input.username, message: (err as Error).message, assertion_match: false }, {});
+    res.status(500).json({ status: "error", message: (err as Error).message });
+  }
+});
 const server = app.listen(config.port, "0.0.0.0", () => {
   console.log(`Risk Bot v2.3 (modular + allure + login + session) running on port ${config.port}`);
   console.log(`Dashboard: ${config.dashboardUrl}`);

@@ -1,206 +1,226 @@
-import type { Request, Response } from "express";
-import type { Browser, BrowserContext, Page } from "playwright";
-import { chromium } from "playwright";
-import { expect } from "@playwright/test";
+// ─── Change Password Route (TC 1.6) ──────────────────────────────────────────
+// Flow: login (current) → open profile menu → Change Password modal →
+//       fill + Save → success toast → session still authenticated → logout →
+//       login with NEW password (must succeed) → login with OLD password (must fail).
+//
+// Lockout-safe: returns `active_password` = the credential that is live AFTER the
+// run (NEW if the new-password login succeeded, else CURRENT). n8n persists it to
+// SignIn_Task.password. Self-heals if the stored password is already rotated.
 
-// ─────────────────────────────────────────────────────────────────────────────
-// INTEGRATION POINTS — wire these to the real modules in captus_riskpage_bot.
-//   1. respond()         → your wrapper that writes Supabase + Allure before res.json()
-//   2. saveAllureResult  → exported from ./allureReporter
-//   3. loginViaApi()     → if you already have a shared Approach-B login helper,
-//                          replace the local one below with it (same return shape).
-// ─────────────────────────────────────────────────────────────────────────────
-import { saveAllureResult } from "./allureReporter";
-// import { respond } from "./respond"; // <-- adjust path to your wrapper
+import { BrowserContext, Page } from "playwright";
+import { config } from "../server";
+import { createContextAndLogin } from "../services/loginService";
+import { safeClose, invalidateSession } from "../services/browserManager";
+import { detectToast } from "../services/riskHelpers";
+import { captureFailure } from "../utils/screenshot";
 
-// Tunables -------------------------------------------------------------------
-const LOGIN_API = "/api/auth/login";       // confirm field name below
-const LOGIN_FIELD: "email" | "username" = "email";
-const ME_API = "/api/auth/user";
-// Success-toast matcher. Adjust to your real toast selector/text if different.
-const SUCCESS_TOAST = /password.*(updated|changed|success)|success/i;
+// ─── Types ───────────────────────────────────────────────────────────────────
 
-const TEST_NAME = "TC_Password_Change";
-const ASSERTION_EXPECTED =
-  "Profile menu opens; Change Password modal visible; success toast shown; " +
-  "session stays authenticated after update; logout succeeds; login with NEW " +
-  "password succeeds; login with OLD password is rejected.";
+export interface ChangePasswordInput {
+  username: string;
+  current_password: string;
+  new_password: string;
+  app_url?: string; // accepted but not used — bot logs in via config.loginUrl (env LOGIN_URL)
+}
 
-// ─── Login helper (Approach B): API login, then inject JWT + reuse cookies ───
-async function loginViaApi(
-  context: BrowserContext,
-  page: Page,
-  appUrl: string,
-  username: string,
-  password: string
-): Promise<{ ok: boolean; status: number; token: string | null }> {
-  const resp = await context.request.post(`${appUrl}${LOGIN_API}`, {
-    data: { [LOGIN_FIELD]: username, password },
-    failOnStatusCode: false,
-  });
-  const status = resp.status();
-  if (status !== 200) return { ok: false, status, token: null };
+export interface ChangePasswordStep {
+  step: number;
+  name: string;
+  expected: string;
+  actual: string;
+  status: "pass" | "fail";
+}
 
-  const body: any = await resp.json().catch(() => ({}));
-  const token: string | null = body.token ?? body.accessToken ?? body.jwt ?? null;
-  // connect.sid (HttpOnly) is already in the context cookie jar from the call above.
-  await page.goto(appUrl, { waitUntil: "domcontentloaded" });
-  if (token) {
-    await page.evaluate((t: string) => localStorage.setItem("captus_auth_token", t), token);
-    await page.reload({ waitUntil: "domcontentloaded" });
+export interface ChangePasswordResult {
+  status: "passed" | "failed" | "error";
+  username: string;
+  message: string;
+  total_steps: number;
+  passed: number;
+  failed: number;
+  assertion_actual: string;
+  assertion_match: "pass" | "fail";
+  screenshot_url: string | null;
+  active_password: string;
+  steps: ChangePasswordStep[];
+}
+
+// ─── Local helpers (mirrors auditLog.ts; those copies aren't exported) ────────
+
+async function openUserMenu(page: Page): Promise<void> {
+  const avatar = page
+    .locator("div.rounded-full span.text-white")
+    .filter({ hasText: /^[A-Z]{1,2}$/ })
+    .first();
+  await avatar.waitFor({ state: "visible", timeout: 8_000 });
+  await avatar.click();
+  await page.waitForTimeout(1_000);
+}
+
+async function performLogout(page: Page): Promise<boolean> {
+  try {
+    await openUserMenu(page);
+    const logoutBtn = page.locator('[data-testid="menu-item-logout"]');
+    await logoutBtn.waitFor({ state: "visible", timeout: 5_000 });
+    await logoutBtn.click();
+    await page.waitForTimeout(3_000);
+    const url = page.url();
+    return url.includes("/login") || url.includes("/sign-in");
+  } catch (err) {
+    console.log(`[PwChange] Logout failed: ${(err as Error).message}`);
+    return false;
   }
-  return { ok: true, status, token };
 }
 
-// Clear auth between logins — reuse the SAME context, never spawn a second one.
-async function clearAuth(context: BrowserContext, page: Page, appUrl: string) {
-  await context.clearCookies();
-  await page.goto(appUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
-  await page.evaluate(() => localStorage.clear()).catch(() => {});
+async function performFreshLogin(page: Page, username: string, password: string): Promise<boolean> {
+  try {
+    await page.goto(config.loginUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
+    const emailInput = page.locator('input[name="email"]');
+    await emailInput.waitFor({ state: "visible", timeout: 15_000 });
+    await emailInput.fill(username);
+    const passwordInput = page.locator('input[name="password"]');
+    await passwordInput.waitFor({ state: "visible", timeout: 5_000 });
+    await passwordInput.fill(password);
+    const loginBtn = page.getByTestId("button-login");
+    await loginBtn.waitFor({ state: "visible", timeout: 5_000 });
+    await loginBtn.click();
+    await page.waitForURL((u) => !u.pathname.includes("/login"), { timeout: 15_000 }).catch(() => {});
+    return !page.url().includes("/login");
+  } catch {
+    return false;
+  }
 }
 
-async function openUserMenu(page: Page) {
-  await page.locator('[data-testid="text-username"]').click();
-}
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
-export async function changePassword(req: Request, res: Response) {
-  const { username, current_password, new_password, app_url } = req.body ?? {};
-  const appUrl: string = (app_url || "https://app.captus.ai").replace(/\/+$/, "");
+export async function performChangePassword(input: ChangePasswordInput): Promise<ChangePasswordResult> {
+  const username = input.username;
+  // Rotation direction; may be swapped by self-heal below.
+  let curPw = input.current_password;
+  let tgtPw = input.new_password;
 
-  // Step ledger -> drives passed / total_steps / assertion_actual.
-  const steps: { n: number; label: string; pass: boolean; note: string }[] = [];
-  const record = (n: number, label: string, pass: boolean, note = "") =>
-    steps.push({ n, label, pass, note });
+  const result: ChangePasswordResult = {
+    status: "error",
+    username,
+    message: "",
+    total_steps: 7,
+    passed: 0,
+    failed: 7,
+    assertion_actual: "",
+    assertion_match: "fail",
+    screenshot_url: null,
+    active_password: input.current_password, // safe default — never blanks the stored pw
+    steps: [],
+  };
 
-  let browser: Browser | null = null;
+  const addStep = (name: string, expected: string, actual: string, pass: boolean) =>
+    result.steps.push({ step: result.steps.length + 1, name, expected, actual, status: pass ? "pass" : "fail" });
+
   let context: BrowserContext | null = null;
-  let screenshotUrl = "";
-
-  // Lockout-safety: track which credential is live so n8n can persist it.
-  let curPw: string = current_password;
-  let tgtPw: string = new_password;
-  let modalSuccess = false;
-  let newLoginSuccess = false;
 
   try {
-    browser = await chromium.launch({ args: ["--no-sandbox"] });
-    context = await browser.newContext();
-    const page = await context.newPage();
-
-    // ── Initial login (with self-heal if a prior run already rotated) ──
-    let init = await loginViaApi(context, page, appUrl, username, curPw);
-    if (!init.ok) {
-      const alt = await loginViaApi(context, page, appUrl, username, tgtPw);
-      if (alt.ok) {
-        [curPw, tgtPw] = [tgtPw, curPw]; // swap: account is already on the other pw
-        init = alt;
-      }
+    // ── Login (with self-heal if the stored password is already rotated) ──
+    let session: { context: BrowserContext; page: Page };
+    try {
+      session = await createContextAndLogin(username, curPw);
+    } catch {
+      invalidateSession();
+      session = await createContextAndLogin(username, tgtPw); // throws if this also fails
+      [curPw, tgtPw] = [tgtPw, curPw]; // account was already on the other password
+      console.log("[PwChange] Self-heal: stored password was already rotated; swapped direction.");
     }
-    if (!init.ok) {
-      throw new Error(
-        `Initial login failed for ${username} with both candidate passwords (status ${init.status}).`
-      );
-    }
-    await expect(page.locator('[data-testid="text-username"]')).toBeVisible({ timeout: 15000 });
+    context = session.context;
+    const page = session.page;
 
-    // ── 1. Settings/Profile menu loaded ──
+    // ── 1. Profile menu loaded ──
     await openUserMenu(page);
-    await expect(page.locator('[data-testid="menu-item-change-password"]')).toBeVisible({ timeout: 10000 });
-    record(1, "Profile menu loaded", true);
+    const cpItem = page.locator('[data-testid="menu-item-change-password"]');
+    const menuOk = await cpItem.waitFor({ state: "visible", timeout: 8_000 }).then(() => true).catch(() => false);
+    addStep("Profile menu loaded", "Change Password item visible", menuOk ? "visible" : "not visible", menuOk);
+    if (!menuOk) throw new Error("Profile menu / Change Password item not found");
 
     // ── 2. Change Password modal visible ──
-    await page.locator('[data-testid="menu-item-change-password"]').click();
-    await expect(page.locator('[data-testid="input-current-password"]')).toBeVisible({ timeout: 10000 });
-    record(2, "Change Password modal visible", true);
+    await cpItem.click();
+    const curInput = page.locator('[data-testid="input-current-password"]');
+    const modalOk = await curInput.waitFor({ state: "visible", timeout: 8_000 }).then(() => true).catch(() => false);
+    addStep("Change Password modal visible", "current-password input visible", modalOk ? "visible" : "not visible", modalOk);
+    if (!modalOk) throw new Error("Change Password modal did not open");
 
-    // Fill + submit (UI-driven so the SPA handles CSRF automatically).
-    await page.locator('[data-testid="input-current-password"]').fill(curPw);
+    // Fill + save (UI-driven → SPA handles CSRF).
+    await curInput.fill(curPw);
     await page.locator('[data-testid="input-new-password"]').fill(tgtPw);
     await page.locator('[data-testid="input-confirm-password"]').fill(tgtPw);
     await page.locator('[data-testid="button-save-password"]').click();
 
     // ── 3. Success toast / message visible ──
-    const toast = page
-      .locator('[data-testid*="toast"], [role="status"], [role="alert"]')
-      .filter({ hasText: SUCCESS_TOAST })
-      .first();
-    await expect(toast).toBeVisible({ timeout: 10000 });
-    record(3, "Success toast visible", true);
-    modalSuccess = true;
+    const toast = await detectToast(page, "password");
+    const SUCCESS = /updated|changed|success|saved/i;
+    const toastOk = toast.detected && SUCCESS.test(toast.actualText || "");
+    addStep(
+      "Success toast visible",
+      "success toast after Save",
+      toast.actualText || (toast.detected ? "toast (no success text)" : "no toast"),
+      toastOk
+    );
 
     // ── 4. Session still authenticated after update ──
-    const me = await context.request.get(`${appUrl}${ME_API}`, { failOnStatusCode: false });
-    expect(me.status()).toBe(200);
-    await expect(page.locator('[data-testid="text-username"]')).toBeVisible();
-    record(4, "Session still authenticated", true);
+    await page.waitForTimeout(1_500);
+    const stillIn = !page.url().includes("/login");
+    const avatarPresent = await page
+      .locator("div.rounded-full span.text-white")
+      .first()
+      .isVisible()
+      .catch(() => false);
+    const sessionOk = stillIn && avatarPresent;
+    addStep("Session still authenticated", "logged in after update", `url=${page.url()}, avatar=${avatarPresent}`, sessionOk);
 
     // ── 5. Logout ──
-    await openUserMenu(page);
-    await page.getByText("Sign out", { exact: true }).click();
-    await expect(page).toHaveURL(/\/login/, { timeout: 10000 });
-    record(5, "Logout succeeded", true);
+    const logoutOk = await performLogout(page);
+    addStep("Logout", "redirect to /login", logoutOk ? "logged out" : "logout failed", logoutOk);
 
-    // ── 6. Login with NEW password → success ──
-    await clearAuth(context, page, appUrl);
-    const newLogin = await loginViaApi(context, page, appUrl, username, tgtPw);
-    expect(newLogin.ok).toBe(true);
-    await expect(page.locator('[data-testid="text-username"]')).toBeVisible({ timeout: 15000 });
-    record(6, "Login with NEW password succeeded", true);
-    newLoginSuccess = true;
+    // ── 6. Login with NEW password → success (this is the real proof) ──
+    invalidateSession();
+    const newLoginOk = await performFreshLogin(page, username, tgtPw);
+    addStep("Login with NEW password", "login succeeds", newLoginOk ? "success" : "failed", newLoginOk);
 
     // ── 7. Login with OLD password → failure ──
-    const oldLogin = await context.request.post(`${appUrl}${LOGIN_API}`, {
-      data: { [LOGIN_FIELD]: username, password: curPw },
-      failOnStatusCode: false,
-    });
-    expect(oldLogin.status()).not.toBe(200); // expect 401
-    record(7, "Login with OLD password rejected", true, `status ${oldLogin.status()}`);
-  } catch (err: any) {
-    // Mark the first not-yet-recorded step as the failure and capture evidence.
-    const failedStepNo = steps.length + 1;
-    record(failedStepNo, "FAILED", false, String(err?.message || err));
-    try {
-      if (context) {
-        const page = context.pages()[0];
-        const buf = await page?.screenshot({ fullPage: true });
-        // saveAllureResult / your storage helper returns a hosted URL for the shot.
-        if (buf) screenshotUrl = await saveAllureResult(TEST_NAME, buf).catch(() => "");
-      }
-    } catch {
-      /* best-effort screenshot only */
+    await context.clearCookies().catch(() => {});
+    invalidateSession();
+    const oldLoginWorks = await performFreshLogin(page, username, curPw);
+    addStep("Login with OLD password rejected", "old login fails", oldLoginWorks ? "unexpectedly succeeded" : "rejected", !oldLoginWorks);
+
+    // ── Tally ──
+    result.passed = result.steps.filter((s) => s.status === "pass").length;
+    result.failed = result.total_steps - result.passed;
+    result.status = result.failed === 0 ? "passed" : "failed";
+    result.assertion_match = result.failed === 0 ? "pass" : "fail";
+    result.assertion_actual = result.steps
+      .map((s) => `Step ${s.step}: ${s.name} ${s.status === "pass" ? "✓" : "✗"}`)
+      .join(" | ");
+    result.message = `${result.passed}/${result.total_steps} steps passed`;
+
+    // The login test is the source of truth for which credential is live.
+    result.active_password = newLoginOk ? tgtPw : curPw;
+
+    if (result.failed > 0) {
+      result.screenshot_url = await captureFailure(context, "pwchange_fail");
     }
+    console.log(`[PwChange] RESULT ${result.status.toUpperCase()} (${result.passed}/${result.total_steps}) | active=${result.active_password === input.new_password ? "NEW" : "CURRENT"}`);
+    return result;
+  } catch (err) {
+    result.status = "error";
+    result.message = (err as Error).message;
+    result.assertion_actual =
+      result.steps.map((s) => `Step ${s.step}: ${s.name} ${s.status === "pass" ? "✓" : "✗"}`).join(" | ") ||
+      result.message;
+    result.passed = result.steps.filter((s) => s.status === "pass").length;
+    result.failed = result.total_steps - result.passed;
+    // Logged-in credential (curPw) stays the safe fallback; self-heal recovers next run if the change had applied.
+    result.active_password = curPw;
+    result.screenshot_url = await captureFailure(context, "pwchange_error");
+    console.log(`[PwChange] ERROR: ${result.message}`);
+    return result;
   } finally {
-    // BrowserContext.close() needs the explicit cast (TS flow analysis limitation).
-    if (context) await (context as BrowserContext).close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
+    await safeClose(context);
   }
-
-  // ── Build result ──
-  const TOTAL_STEPS = 7;
-  const passed = steps.filter((s) => s.pass).length;
-  const allPass = passed === TOTAL_STEPS;
-  const assertionActual = steps
-    .map((s) => `Step ${s.n}: ${s.label}${s.note ? ` (${s.note})` : ""} ${s.pass ? "✓" : "✗"}`)
-    .join(" | ");
-
-  // Live credential after the run — n8n persists this to SignIn_Task.password.
-  const activePassword = modalSuccess && newLoginSuccess ? tgtPw : curPw;
-
-  const result = {
-    status: allPass ? "passed" : "failed",
-    message: allPass
-      ? "Password change verified end-to-end; new password active."
-      : `Password change verification failed at step ${passed + 1}.`,
-    assertion_expected: ASSERTION_EXPECTED,
-    assertion_actual: assertionActual,
-    assertion_match: allPass ? "yes" : "no",
-    passed,
-    total_steps: TOTAL_STEPS,
-    screenshot_url: screenshotUrl,
-    active_password: activePassword,
-  };
-
-  // respond() should write Supabase + Allure, then res.json(result).
-  // return respond(res, TEST_NAME, result);
-  return res.json(result);
 }
