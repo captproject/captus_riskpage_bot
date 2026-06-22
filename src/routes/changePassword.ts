@@ -191,6 +191,11 @@ export async function performChangePassword(input: ChangePasswordInput): Promise
     // ── 5. Logout ──
     const logoutOk = await performLogout(page);
     addStep("Logout", "redirect to /login", logoutOk ? "logged out" : "logout failed", logoutOk);
+    // Capture evidence NOW (menu state) — by the end of the run the page is on
+    // the login screen and a late screenshot wouldn't show the logout problem.
+    if (!logoutOk) {
+      result.screenshot_url = await captureFailure(context, "pwchange_logout_fail");
+    }
 
     // ── 6. Login with NEW password → success (this is the real proof) ──
     invalidateSession();
@@ -216,7 +221,7 @@ export async function performChangePassword(input: ChangePasswordInput): Promise
     // The login test is the source of truth for which credential is live.
     result.active_password = newLoginOk ? tgtPw : curPw;
 
-    if (result.failed > 0) {
+    if (result.failed > 0 && !result.screenshot_url) {
       result.screenshot_url = await captureFailure(context, "pwchange_fail");
     }
     console.log(`[PwChange] RESULT ${result.status.toUpperCase()} (${result.passed}/${result.total_steps}) | active=${result.active_password === input.new_password ? "NEW" : "CURRENT"}`);
