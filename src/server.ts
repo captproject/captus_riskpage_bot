@@ -494,13 +494,13 @@ app.get("/health", (_req: Request, res: Response) => {
 // ─── POST /change-password (TC 1.6) ──────────────────────────────────────────
 app.post("/change-password", authMiddleware, async (req: Request, res: Response) => {
   const input = req.body;
-  if (!input.username || !input.current_password || !input.new_password) {
-    res.status(400).json({ status: "error", message: "Missing: username, current_password, new_password" }); return;
+if (!input.username || !input.current_password || !input.baseline_password || !input.temp_password) {
+    res.status(400).json({ status: "error", message: "Missing: username, current_password, baseline_password, temp_password" }); return;
   }
-  const startTime = Date.now();
+    const startTime = Date.now();
   try {
     const result = await executionQueue.add(() =>
-      withTimeout(() => performChangePassword(input), 300_000, "change-password")
+      withTimeout(() => performChangePassword(input), 600_000, "change-password")
     );
     await saveTestResult("TC_Password_Change", {
       status: result.status, username: result.username, message: result.message,
