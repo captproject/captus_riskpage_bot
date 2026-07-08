@@ -287,19 +287,64 @@ app.post("/audit-log", authMiddleware, async (req: Request, res: Response) => {
   }
 });
 app.post("/test-risk-ingestion", async (req, res) => {
+  const startTime = Date.now();
+  const input = req.body ?? {};
   try {
     const result = await performRiskIngestion(req.body);
+
+    await saveTestResult("TC_Integration_Tests", {
+      status: result.status,
+      username: input.username || "",
+      risk_title: result.risk_title || null,
+      message: `INT-3.1 | ${result.steps_summary || result.message}`,
+      assertion_expected: "API-created risk visible in UI and audit log within 5 steps",
+      assertion_actual: `${result.passed || 0} of ${result.total_steps || 5} steps passed`,
+      assertion_match: result.status === "pass",
+      screenshot_failure: result.screenshots?.failure || null,
+    }, { test_case: "INT-3.1", steps: result.steps });
+
+    recordTestResult("INT-3.1 Risk Ingestion (API→UI→Audit)", "Integration Tests", result.status, result.steps_summary || result.message, startTime, undefined, result.screenshots?.failure, {
+      assertion_expected: "API-created risk visible in UI and audit log within 5 steps",
+      assertion_actual: `${result.passed || 0} of ${result.total_steps || 5} steps passed`,
+      username: input.username, risk_title: result.risk_title || undefined,
+    });
+
     res.json(result);
   } catch (err) {
+    await saveTestResult("TC_Integration_Tests", { status: "error", username: input.username || "", message: `INT-3.1 | ${(err as Error).message}`, assertion_match: false }, { test_case: "INT-3.1", failure_type: "EXECUTION_ERROR" });
+    recordTestResult("INT-3.1 Risk Ingestion (API→UI→Audit)", "Integration Tests", "error", (err as Error).message, startTime, undefined, undefined, { assertion_expected: "API-created risk visible in UI and audit log within 5 steps", assertion_actual: (err as Error).message, failure_type: "EXECUTION_ERROR", username: input.username });
     res.status(500).json({ status: "error", message: (err as Error).message });
   }
 });
 
 app.post("/test-bulk-operations", async (req, res) => {
+  const startTime = Date.now();
+  const input = req.body ?? {};
   try {
     const result = await performBulkOperations(req.body);
+
+    const failedAssertions = Object.entries(result.assertions || {}).filter(([, v]) => !v).map(([k]) => k);
+    await saveTestResult("TC_Integration_Tests", {
+      status: result.status,
+      username: input.username || "",
+      risk_title: null,
+      message: `INT-3.9 | ${result.message}`,
+      assertion_expected: "All bulk operation assertions pass (batches A/B/C + cleanup)",
+      assertion_actual: failedAssertions.length === 0 ? "All assertions passed" : `Failed: ${failedAssertions.join(", ")}`,
+      assertion_match: result.status === "pass",
+      screenshot_failure: result.screenshots?.failure || null,
+    }, { test_case: "INT-3.9", batch_a: result.batch_a, batch_b: result.batch_b, batch_c: result.batch_c, cleanup: result.cleanup, assertions: result.assertions });
+
+    recordTestResult("INT-3.9 Bulk Operations (10/100/mixed)", "Integration Tests", result.status, result.message, startTime, undefined, result.screenshots?.failure, {
+      assertion_expected: "All bulk operation assertions pass (batches A/B/C + cleanup)",
+      assertion_actual: failedAssertions.length === 0 ? "All assertions passed" : `Failed: ${failedAssertions.join(", ")}`,
+      username: input.username,
+    });
+
     res.json(result);
   } catch (err) {
+    await saveTestResult("TC_Integration_Tests", { status: "error", username: input.username || "", message: `INT-3.9 | ${(err as Error).message}`, assertion_match: false }, { test_case: "INT-3.9", failure_type: "EXECUTION_ERROR" });
+    recordTestResult("INT-3.9 Bulk Operations (10/100/mixed)", "Integration Tests", "error", (err as Error).message, startTime, undefined, undefined, { assertion_expected: "All bulk operation assertions pass (batches A/B/C + cleanup)", assertion_actual: (err as Error).message, failure_type: "EXECUTION_ERROR", username: input.username });
     res.status(500).json({ status: "error", message: (err as Error).message });
   }
 });

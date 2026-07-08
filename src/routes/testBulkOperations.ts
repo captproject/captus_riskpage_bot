@@ -170,7 +170,12 @@ async function countRisksInUiByPrefix(page: Page, fullPrefix: string): Promise<n
       waitUntil: "domcontentloaded",
       timeout: config.navigationTimeout,
     });
-    await page.waitForTimeout(2_000);
+    // Wait for the table to actually render rows (same 8s tolerance as spotCheckTitles)
+    // instead of a fixed 2s sleep — the UI refresh made first paint slower than data render.
+    await page.getByText(fullPrefix, { exact: false }).first()
+      .waitFor({ state: "visible", timeout: 8_000 })
+      .catch(() => { /* no match after wait — fall through and count (may legitimately be 0) */ });
+    await page.waitForTimeout(1_000); // let remaining rows settle after first match
     return await page.evaluate((p) => {
       const text = document.body.innerText ?? "";
       const matches = text.match(new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"));
