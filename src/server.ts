@@ -31,10 +31,10 @@ import getCurrentUserRouter from "./routes/getCurrentUser";
 
 
 export const config: Config = {
-  loginUrl: process.env.LOGIN_URL || "https://captus.replit.app/login",
-  dashboardUrl: process.env.DASHBOARD_URL || "https://captus.replit.app/dashboard",
-  tableUrl: process.env.TABLE_URL || "https://captus.replit.app/table",
-  auditUrl: process.env.AUDIT_URL || "https://captus.replit.app/admin/audit",
+  loginUrl: process.env.LOGIN_URL || "https://app.captus.ai/login",
+  dashboardUrl: process.env.DASHBOARD_URL || "https://app.captus.ai/dashboard",
+  tableUrl: process.env.TABLE_URL || "https://app.captus.ai/table",
+  auditUrl: process.env.AUDIT_URL || "https://app.captus.ai/admin/audit",
   apiKey: process.env.API_KEY || "",
   supabaseUrl: process.env.SUPABASE_URL || "",
   supabaseKey: process.env.SUPABASE_KEY || "",
