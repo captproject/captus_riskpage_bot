@@ -3,7 +3,7 @@ import { BrowserContext, Page } from "playwright";
 import { StatusWorkflowInput, StepResult, StatusWorkflowResult } from "../utils/types";
 import { config } from "../server";
 import { createContextAndLogin } from "../services/loginService";
-import { fillRiskForm, selectDropdown, detectToast, searchRisk, clickFirstEditButton, riskVisibleInPage } from "../services/riskHelpers";
+import { fillRiskForm, selectDropdown, detectToast, searchRisk, riskVisibleInPage, openRiskDetail, saveRiskDetail, closeRiskDetail } from "../services/riskHelpers";
 import { safeClose } from "../services/browserManager";
 import { captureFailure, uploadScreenshot } from "../utils/screenshot";
 
@@ -41,15 +41,20 @@ async function verifyRiskStatus(page: Page, title: string, expectedStatus: strin
 async function updateRiskStatus(page: Page, title: string, newStatus: string): Promise<{ success: boolean; toastText: string | null }> {
   await navigateTo(page, config.dashboardUrl);
   await searchRisk(page, title);
-  if (!(await clickFirstEditButton(page))) {
-    console.log("[Status] Edit button not found");
+  // UI change 2026-07-08: edit button removed — open the risk detail view instead
+  if (!(await openRiskDetail(page, title))) {
+    console.log("[Status] Risk detail view did not open");
     return { success: false, toastText: null };
   }
-  await selectDropdown(page, "select-risk-status", newStatus);
-  const updateBtn = page.getByTestId("button-save-risk");
-  await updateBtn.waitFor({ state: "visible", timeout: 5_000 });
-  await updateBtn.click();
+  await selectDropdown(page, "select-detail-status", newStatus);
+  // Dropdown changes commit immediately, so Save Risk should mount right away
+  if (!(await saveRiskDetail(page))) {
+    console.log("[Status] Save Risk button did not appear");
+    return { success: false, toastText: null };
+  }
+  // Detect toast before closing (toaster is global, but catch it while fresh)
   const toast = await detectToast(page, "Risk updated successfully");
+  await closeRiskDetail(page);
   return { success: toast.detected, toastText: toast.actualText };
 }
 

@@ -535,6 +535,12 @@ app.get("/health", (_req: Request, res: Response) => {
     memory: { rss: `${Math.round(mem.rss / 1024 / 1024)} MB`, heapUsed: `${Math.round(mem.heapUsed / 1024 / 1024)} MB` },
     timestamp: new Date().toISOString(),
   });
+  app.get("/version", (_req: Request, res: Response) => {
+  res.json({
+    commit: process.env.RENDER_GIT_COMMIT || "unknown",
+    deployed_at: process.env.RENDER_GIT_COMMIT ? undefined : "local",
+  });
+});
 });
 // ─── POST /change-password (TC 1.6) ──────────────────────────────────────────
 app.post("/change-password", authMiddleware, async (req: Request, res: Response) => {
