@@ -342,6 +342,58 @@ export async function clickFirstEditButton(page: Page): Promise<boolean> {
   }
 }
 
+// ─── Risk Detail View Flow (UI change 2026-07-08: edit button removed) ───────
+// Clicking the risk card on the dashboard now opens an editable detail view.
+// "Save Risk" (button-save-risk-detail) only mounts after a change is committed:
+// dropdown selections commit immediately, but text inputs (title/owner/cost/etc.)
+// require a blur before the button appears — handled via Tab presses below.
+
+export async function openRiskDetail(page: Page, title: string): Promise<boolean> {
+  try {
+    const cardTitle = page.locator("h4", { hasText: title }).first();
+    await cardTitle.waitFor({ state: "visible", timeout: 5_000 });
+    await cardTitle.click();
+    // Close button is present as soon as the detail view opens (unlike Save Risk)
+    await page.getByTestId("button-close-risk-detail").waitFor({ state: "visible", timeout: 7_000 });
+    console.log(`[Detail] Opened risk detail for "${title}"`);
+    return true;
+  } catch {
+    console.log(`[Detail] Could not open risk detail for "${title}"`);
+    return false;
+  }
+}
+
+export async function saveRiskDetail(page: Page): Promise<boolean> {
+  const saveBtn = page.getByTestId("button-save-risk-detail");
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await saveBtn.waitFor({ state: "visible", timeout: 3_000 });
+      await saveBtn.click();
+      console.log(`[Detail] Save Risk clicked (attempt ${attempt})`);
+      return true;
+    } catch {
+      // Text inputs need a blur before Save Risk mounts — Tab moves focus off the field
+      console.log(`[Detail] Save Risk not visible yet — pressing Tab to commit fields (attempt ${attempt})`);
+      await page.keyboard.press("Tab");
+      await page.waitForTimeout(500);
+    }
+  }
+  console.log("[Detail] Save Risk button never appeared");
+  return false;
+}
+
+export async function closeRiskDetail(page: Page): Promise<void> {
+  try {
+    const closeBtn = page.getByTestId("button-close-risk-detail");
+    await closeBtn.waitFor({ state: "visible", timeout: 5_000 });
+    await closeBtn.click();
+    await closeBtn.waitFor({ state: "hidden", timeout: 5_000 }).catch(() => {});
+    console.log("[Detail] Detail view closed");
+  } catch {
+    console.log("[Detail] Close button not found — continuing");
+  }
+}
+
 // ─── Normalize Values for Comparison ─────────────────────────────────────────
 
 export function normalize(v: any): string {

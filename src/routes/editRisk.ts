@@ -1,9 +1,12 @@
-// ─── Edit Risk Route — matches old server.ts exactly ──────────────────────────
+// ─── Edit Risk Route — risk detail view flow ──────────────────────────────────
+// UI change 2026-07-08: the per-card edit button (button-edit-heatmap-risk-*)
+// was removed. Clicking the risk card now opens an editable detail view with
+// "Save Risk" (button-save-risk-detail) and "Close" (button-close-risk-detail).
 import { BrowserContext } from "playwright";
 import { EditRiskInput, RiskResult } from "../utils/types";
 import { config } from "../server";
 import { createContextAndLogin } from "../services/loginService";
-import { fillRiskForm, searchRisk, clickFirstEditButton, riskVisibleInPage } from "../services/riskHelpers";
+import { fillRiskForm, searchRisk, openRiskDetail, saveRiskDetail, closeRiskDetail } from "../services/riskHelpers";
 import { validateRiskAction } from "../services/validationService";
 import { safeClose } from "../services/browserManager";
 import { captureFailure, uploadScreenshot } from "../utils/screenshot";
@@ -29,17 +32,17 @@ export async function performEditRisk(input: EditRiskInput): Promise<RiskResult>
     await page.waitForTimeout(2_000);
     await searchRisk(page, input.searchTitle);
 
-    // Click edit button on heatmap
-    if (!(await clickFirstEditButton(page))) {
+    // Open the risk detail view by clicking the risk card (replaces removed edit button)
+    if (!(await openRiskDetail(page, input.searchTitle))) {
       const s = await page.screenshot({ fullPage: true });
-      result.screenshots.failure = await uploadScreenshot(s, "edit_btn_not_found");
+      result.screenshots.failure = await uploadScreenshot(s, "risk_detail_not_opened");
       result.status = "failed";
-      result.message = `Edit button not found for: "${input.searchTitle}"`;
-      result.failure_type = "EDIT_BUTTON_NOT_FOUND";
+      result.message = `Risk detail view did not open for: "${input.searchTitle}"`;
+      result.failure_type = "RISK_DETAIL_NOT_OPENED";
       return result;
     }
 
-    // Fill form with new values
+    // Fill fields in the detail view with new values
     await fillRiskForm(page, {
       title: input.newTitle, description: input.newDescription,
       category: input.newCategory, status: input.newStatus,
@@ -48,11 +51,22 @@ export async function performEditRisk(input: EditRiskInput): Promise<RiskResult>
       potentialCost: input.newPotentialCost, mitigationPlan: input.newMitigationPlan,
     });
 
-    // Click save
-    const saveBtn = page.getByTestId("button-save-risk");
-    await saveBtn.waitFor({ state: "visible", timeout: 5_000 });
-    await saveBtn.click();
-    console.log("[Edit] Form submitted — starting validation");
+    // Click "Save Risk" — only mounts after a change is committed (Tab-blur handled inside)
+    if (!(await saveRiskDetail(page))) {
+      const s = await page.screenshot({ fullPage: true });
+      result.screenshots.failure = await uploadScreenshot(s, "save_risk_btn_not_found");
+      result.status = "failed";
+      result.message = `Save Risk button did not appear for: "${input.searchTitle}"`;
+      result.failure_type = "SAVE_BUTTON_NOT_FOUND";
+      return result;
+    }
+    console.log("[Edit] Save Risk submitted — closing detail view");
+
+    // Let the save request fire, then close the detail view.
+    // The sonner toaster is global, so the success toast survives the panel close
+    // and is picked up by validation Layer 1 below.
+    await page.waitForTimeout(500);
+    await closeRiskDetail(page);
 
     // Centralized 4-layer validation with specific toast message
     const validation = await validateRiskAction(page, {
