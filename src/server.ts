@@ -33,6 +33,7 @@ import getCurrentUserRouter from "./routes/getCurrentUser";
 export const config: Config = {
   loginUrl: process.env.LOGIN_URL || "https://app.captus.ai/login",
   dashboardUrl: process.env.DASHBOARD_URL || "https://app.captus.ai/dashboard",
+  apiBaseUrl: process.env.API_BASE_URL || "https://web-demo-application.onrender.com",
   tableUrl: process.env.TABLE_URL || "https://app.captus.ai/table",
   auditUrl: process.env.AUDIT_URL || "https://app.captus.ai/admin/audit",
   apiKey: process.env.API_KEY || "",

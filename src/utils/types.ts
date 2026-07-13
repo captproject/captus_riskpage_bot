@@ -8,6 +8,7 @@ import { BrowserContext, Page } from "playwright";
 export interface Config {
   loginUrl: string;
   dashboardUrl: string;
+  apiBaseUrl: string;
   tableUrl: string;
   auditUrl: string;
   apiKey: string;

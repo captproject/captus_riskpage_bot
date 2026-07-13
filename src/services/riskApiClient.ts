@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// riskApiClient.ts  (v3)
+// riskApiClient.ts  (v5)
 //
 // In-browser fetch helpers for the Captus /api/risks endpoint.
 //
@@ -11,13 +11,22 @@
 // `token` and `csrfToken`). This client performs its own /api/auth/login
 // and attaches both headers explicitly on writes.
 //
-// v3 changes:
+// v5 changes (2026-07-13 — Vercel/Render migration):
+//   - Frontend moved to app.captus.ai (Vercel, static); backend API moved to
+//     its own host (config.apiBaseUrl, currently web-demo-application.onrender.com).
+//     Relative fetch("/api/...") now resolves against the static frontend origin
+//     and returns 405 with an empty body. All four fetch calls now prefix
+//     config.apiBaseUrl, passed into page.evaluate explicitly.
+//   - No other behavioral changes from v4.
+//
+// v4 changes:
 //   - Invalid-variant payloads swapped to ones that actually fail server validation.
 //     Previous variants (bad_category, missing_project) were accepted by Captus,
 //     leaving orphan rows. New variants stress validators we know exist.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Page } from "playwright";
+import { config } from "../server";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -71,11 +80,12 @@ export async function authenticateApi(
     return cachedAuth;
   }
 
-  console.log("[ApiAuth] Logging in via /api/auth/login");
+  const apiBase = config.apiBaseUrl;
+  console.log(`[ApiAuth] Logging in via ${apiBase}/api/auth/login`);
   const result = await page.evaluate(
-    async ({ u, p }) => {
+    async ({ u, p, base }) => {
       try {
-        const res = await fetch("/api/auth/login", {
+        const res = await fetch(`${base}/api/auth/login`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -89,7 +99,7 @@ export async function authenticateApi(
         return { status: 0, body: null, error: String(e?.message ?? e) };
       }
     },
-    { u: username, p: password }
+    { u: username, p: password, base: apiBase }
   );
 
   if (result.status !== 200 || !result.body?.token || !result.body?.csrfToken) {
@@ -180,9 +190,9 @@ export async function createRisk(
   const start = Date.now();
   try {
     const result = await page.evaluate(
-      async ({ body, token, csrf }) => {
+      async ({ body, token, csrf, base }) => {
         try {
-          const res = await fetch("/api/risks", {
+          const res = await fetch(`${base}/api/risks`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -200,7 +210,7 @@ export async function createRisk(
           return { status: 0, body: null, error: String(e?.message ?? e) };
         }
       },
-      { body: payload as any, token: auth.token, csrf: auth.csrfToken }
+      { body: payload as any, token: auth.token, csrf: auth.csrfToken, base: config.apiBaseUrl }
     );
 
     return {
@@ -227,9 +237,9 @@ export async function deleteRisk(
   const start = Date.now();
   try {
     const result = await page.evaluate(
-      async ({ riskId, token, csrf }) => {
+      async ({ riskId, token, csrf, base }) => {
         try {
-          const res = await fetch(`/api/risks/${encodeURIComponent(riskId)}`, {
+          const res = await fetch(`${base}/api/risks/${encodeURIComponent(riskId)}`, {
             method: "DELETE",
             headers: {
               "Authorization": `Bearer ${token}`,
@@ -244,7 +254,7 @@ export async function deleteRisk(
           return { status: 0, body: null, error: String(e?.message ?? e) };
         }
       },
-      { riskId: id, token: auth.token, csrf: auth.csrfToken }
+      { riskId: id, token: auth.token, csrf: auth.csrfToken, base: config.apiBaseUrl }
     );
 
     return {
@@ -267,9 +277,9 @@ export async function listRisks(page: Page, auth: ApiAuth): Promise<ApiCallResul
   const start = Date.now();
   try {
     const result = await page.evaluate(
-      async ({ token }) => {
+      async ({ token, base }) => {
         try {
-          const res = await fetch("/api/risks", {
+          const res = await fetch(`${base}/api/risks`, {
             method: "GET",
             headers: { "Authorization": `Bearer ${token}` },
             credentials: "include",
@@ -282,7 +292,7 @@ export async function listRisks(page: Page, auth: ApiAuth): Promise<ApiCallResul
           return { status: 0, body: null, error: String(e?.message ?? e) };
         }
       },
-      { token: auth.token }
+      { token: auth.token, base: config.apiBaseUrl }
     );
 
     return {
