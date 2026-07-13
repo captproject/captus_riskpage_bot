@@ -186,24 +186,55 @@ async function countRisksInUiByPrefix(page: Page, fullPrefix: string): Promise<n
   }
 }
 
+/**
+ * v4 (2026-07-13, Vercel/Render migration): the new frontend's table does not
+ * render all rows in the DOM at once (server-side pagination, limit≈25), so a
+ * raw getByText scan misses rows beyond the first page — all three spot checks
+ * failed with 110 test rows present even though every create returned 201.
+ * Use the table's search box per title instead, the same mechanism INT 3.1's
+ * ui_verify uses, which passes on the new frontend.
+ */
 async function spotCheckTitles(
   page: Page,
   titles: string[]
 ): Promise<{ first: boolean; middle: boolean; last: boolean }> {
+  const results: boolean[] = [false, false, false];
   try {
     await page.goto(config.tableUrl, {
       waitUntil: "domcontentloaded",
       timeout: config.navigationTimeout,
     });
     await page.waitForTimeout(2_000);
-    const results = await Promise.all(
-      titles.map((t) =>
-        page.getByText(t, { exact: false }).first().isVisible({ timeout: 8_000 }).catch(() => false)
-      )
-    );
+
+    const searchInput = page
+      .getByPlaceholder(/search/i)
+      .or(page.locator('input[type="search"]'))
+      .or(page.locator('[data-testid="input-search"]'))
+      .first();
+    const hasSearch = await searchInput.isVisible({ timeout: 3_000 }).catch(() => false);
+    if (!hasSearch) {
+      console.log("[INT39] Spot check: search input not found — falling back to page scan");
+    }
+
+    for (let i = 0; i < titles.length; i++) {
+      if (hasSearch) {
+        await searchInput.fill(titles[i]);
+        await page.waitForTimeout(1_500);
+      }
+      results[i] = await page
+        .getByText(titles[i], { exact: false })
+        .first()
+        .isVisible({ timeout: 8_000 })
+        .catch(() => false);
+      console.log(`[INT39] Spot check "${titles[i]}": ${results[i] ? "found" : "not found"}`);
+      if (hasSearch) {
+        await searchInput.fill("");
+        await page.waitForTimeout(500);
+      }
+    }
     return { first: results[0], middle: results[1], last: results[2] };
   } catch {
-    return { first: false, middle: false, last: false };
+    return { first: results[0], middle: results[1], last: results[2] };
   }
 }
 

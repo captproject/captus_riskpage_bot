@@ -106,10 +106,28 @@ async function verifyRiskInUI(page: Page, title: string): Promise<boolean> {
 async function navigateToAuditTrail(page: Page): Promise<void> {
   console.log("[INT31] Navigating to audit trail");
   await page.goto(config.auditUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
-  await page.waitForTimeout(2_500);
+  await waitForAuditTableSettled(page);
   await page.waitForSelector('[data-testid^="row-audit-log-"]', { timeout: 15_000 }).catch(() => {
     console.log("[INT31] No audit rows visible yet");
   });
+}
+
+/**
+ * v2 (2026-07-13, Vercel/Render migration): filter changes now trigger a
+ * cross-origin fetch to the Render backend; the old fixed 1.5s wait counted
+ * rows while the table still showed "Loading audit logs...", reading 0.
+ * Wait for the loading indicator to clear before counting.
+ */
+async function waitForAuditTableSettled(page: Page, timeoutMs = 20_000): Promise<void> {
+  const loading = page.getByText(/loading audit logs/i).first();
+  await loading.waitFor({ state: "visible", timeout: 2_000 }).catch(() => {});
+  const stillLoading = await loading.isVisible().catch(() => false);
+  if (stillLoading) {
+    await loading.waitFor({ state: "hidden", timeout: timeoutMs }).catch(() => {
+      console.log("[INT31] Loading indicator still visible after wait — counting anyway");
+    });
+  }
+  await page.waitForTimeout(500);
 }
 
 async function applyCreateActionFilter(page: Page): Promise<void> {
@@ -130,7 +148,7 @@ async function applyCreateActionFilter(page: Page): Promise<void> {
     const option = page.getByRole("option", { name: "Create", exact: true });
     await option.waitFor({ state: "visible", timeout: 3_000 });
     await option.click();
-    await page.waitForTimeout(1_500);
+    await waitForAuditTableSettled(page);
     console.log(`[INT31] Applied Create filter`);
   } catch (err) {
     console.log(`[INT31] Failed to apply filter: ${(err as Error).message}`);

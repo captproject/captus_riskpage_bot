@@ -17,10 +17,32 @@ async function navigateTo(page: Page, url: string): Promise<void> {
 async function navigateToAuditTrail(page: Page): Promise<void> {
   console.log("[Audit] Navigating to audit trail");
   await page.goto(config.auditUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
-  await page.waitForTimeout(2_500);
+  await waitForAuditTableSettled(page);
   await page.waitForSelector('[data-testid^="row-audit-log-"]', { timeout: 15_000 }).catch(() => {
     console.log("[Audit] No audit rows visible yet");
   });
+}
+
+/**
+ * v2 (2026-07-13, Vercel/Render migration): every filter change fires a
+ * cross-origin request to the Render backend, which can take well over the
+ * old fixed 1.5s wait. The table shows "Loading audit logs..." while the
+ * request is in flight — counting rows during that window reads 0 and
+ * produces false failures. This waits deterministically for the loading
+ * indicator to clear before any row count.
+ */
+async function waitForAuditTableSettled(page: Page, timeoutMs = 20_000): Promise<void> {
+  const loading = page.getByText(/loading audit logs/i).first();
+  // Give the loading state a moment to appear (it may already be gone)
+  await loading.waitFor({ state: "visible", timeout: 2_000 }).catch(() => {});
+  // Then wait for it to disappear — this is the real "data arrived" signal
+  const stillLoading = await loading.isVisible().catch(() => false);
+  if (stillLoading) {
+    await loading.waitFor({ state: "hidden", timeout: timeoutMs }).catch(() => {
+      console.log("[Audit] Loading indicator still visible after wait — counting anyway");
+    });
+  }
+  await page.waitForTimeout(500); // let rows paint after data arrives
 }
 
 async function applyAuditActionFilter(page: Page, actionName: string): Promise<void> {
@@ -48,7 +70,7 @@ async function applyAuditActionFilter(page: Page, actionName: string): Promise<v
     const option = page.getByRole("option", { name: actionName, exact: true });
     await option.waitFor({ state: "visible", timeout: 3_000 });
     await option.click();
-    await page.waitForTimeout(1_500);
+    await waitForAuditTableSettled(page);
     console.log(`[Audit] Applied action filter: "${actionName}"`);
   } catch (err) {
     console.log(`[Audit] Failed to apply filter "${actionName}": ${(err as Error).message}`);
@@ -62,7 +84,7 @@ async function clearAuditFilters(page: Page): Promise<void> {
   const isVisible = await clearBtn.first().isVisible().catch(() => false);
   if (isVisible) {
     await clearBtn.first().click();
-    await page.waitForTimeout(1_500);
+    await waitForAuditTableSettled(page);
     console.log("[Audit] Filters cleared");
   }
 }
