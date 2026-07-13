@@ -6,7 +6,7 @@ import { BrowserContext } from "playwright";
 import { EditRiskInput, RiskResult } from "../utils/types";
 import { config } from "../server";
 import { createContextAndLogin } from "../services/loginService";
-import { fillRiskForm, searchRisk, openRiskDetail, saveRiskDetail, closeRiskDetail } from "../services/riskHelpers";
+import { fillRiskDetailForm, searchRisk, openRiskDetail, saveRiskDetail, closeRiskDetail } from "../services/riskHelpers";
 import { validateRiskAction } from "../services/validationService";
 import { safeClose } from "../services/browserManager";
 import { captureFailure, uploadScreenshot } from "../utils/screenshot";
@@ -43,7 +43,7 @@ export async function performEditRisk(input: EditRiskInput): Promise<RiskResult>
     }
 
     // Fill fields in the detail view with new values
-    await fillRiskForm(page, {
+    await fillRiskDetailForm(page, {
       title: input.newTitle, description: input.newDescription,
       category: input.newCategory, status: input.newStatus,
       impact: input.newImpact, likelihood: input.newLikelihood,

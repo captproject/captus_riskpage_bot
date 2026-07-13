@@ -350,9 +350,17 @@ export async function clickFirstEditButton(page: Page): Promise<boolean> {
 
 export async function openRiskDetail(page: Page, title: string): Promise<boolean> {
   try {
-    const cardTitle = page.locator("h4", { hasText: title }).first();
-    await cardTitle.waitFor({ state: "visible", timeout: 5_000 });
-    await cardTitle.click();
+    // Risk cards carry data-testid="heatmap-risk-card-{id}" — filter by title text
+    const card = page.locator('[data-testid^="heatmap-risk-card-"]', { hasText: title }).first();
+    try {
+      await card.waitFor({ state: "visible", timeout: 5_000 });
+      await card.click();
+    } catch {
+      // Fallback: click the card heading directly
+      const cardTitle = page.locator("h4", { hasText: title }).first();
+      await cardTitle.waitFor({ state: "visible", timeout: 3_000 });
+      await cardTitle.click();
+    }
     // Close button is present as soon as the detail view opens (unlike Save Risk)
     await page.getByTestId("button-close-risk-detail").waitFor({ state: "visible", timeout: 7_000 });
     console.log(`[Detail] Opened risk detail for "${title}"`);
@@ -360,6 +368,90 @@ export async function openRiskDetail(page: Page, title: string): Promise<boolean
   } catch {
     console.log(`[Detail] Could not open risk detail for "${title}"`);
     return false;
+  }
+}
+
+// ─── Fill Risk Detail Form (detail view testids, -detail naming scheme) ──────
+// text-detail-* elements are inline click-to-edit; input-detail-* are plain
+// inputs; select-detail-* reuse the standard dropdown pattern.
+
+async function fillDetailTextField(page: Page, testId: string, value: string): Promise<void> {
+  const el = page.getByTestId(testId);
+  await el.waitFor({ state: "visible", timeout: 5_000 });
+
+  for (const mode of ["click", "dblclick"] as const) {
+    if (mode === "click") await el.click(); else await el.dblclick();
+    await page.waitForTimeout(400);
+
+    // The element itself may be (or become) an input/textarea
+    const tag = await page.evaluate((tid) => {
+      const node = document.querySelector(`[data-testid="${tid}"]`);
+      return node ? node.tagName.toLowerCase() : null;
+    }, testId);
+    if (tag === "input" || tag === "textarea") {
+      await page.getByTestId(testId).fill(value);
+      return;
+    }
+
+    // An input/textarea may be nested inside it after activation
+    const nested = page.locator(`[data-testid="${testId}"] input, [data-testid="${testId}"] textarea`).first();
+    if ((await nested.count()) > 0) {
+      await nested.fill(value);
+      return;
+    }
+
+    // Focused editable (contenteditable or a swapped-in input elsewhere)
+    const editableFocused = await page.evaluate(() => {
+      const a = document.activeElement as HTMLElement | null;
+      if (!a) return false;
+      const t = a.tagName.toLowerCase();
+      return t === "input" || t === "textarea" || a.isContentEditable;
+    });
+    if (editableFocused) {
+      await page.keyboard.press("Control+a");
+      await page.keyboard.type(value);
+      return;
+    }
+    console.log(`[Form] "${testId}" not editable after ${mode} — ${mode === "click" ? "trying dblclick" : "giving up"}`);
+  }
+  throw new Error(`Detail field "${testId}" did not become editable`);
+}
+
+export async function fillRiskDetailForm(page: Page, data: {
+  title?: string; description?: string; category?: string; status?: string;
+  impact?: string; likelihood?: string; owner?: string; dueDate?: string;
+  potentialCost?: string; mitigationPlan?: string;
+}): Promise<void> {
+  if (data.title) {
+    console.log(`[Form] Detail title: "${data.title}"`);
+    await fillDetailTextField(page, "text-detail-title", data.title);
+  }
+  if (data.description) {
+    console.log("[Form] Detail description");
+    await fillDetailTextField(page, "text-detail-description", data.description);
+  }
+  if (data.category) { console.log(`[Form] Detail category: "${data.category}"`); await selectDropdown(page, "select-detail-category", data.category); }
+  if (data.status) { console.log(`[Form] Detail status: "${data.status}"`); await selectDropdown(page, "select-detail-status", data.status); }
+  if (data.impact) { console.log(`[Form] Detail impact: "${data.impact}"`); await selectDropdown(page, "select-detail-impact", data.impact); }
+  if (data.likelihood) { console.log(`[Form] Detail likelihood: "${data.likelihood}"`); await selectDropdown(page, "select-detail-likelihood", data.likelihood); }
+  if (data.owner) {
+    console.log(`[Form] Detail owner: "${data.owner}"`);
+    const f = page.getByTestId("input-detail-owner");
+    await f.waitFor({ state: "visible", timeout: 5_000 });
+    await f.fill(data.owner);
+  }
+  if (data.potentialCost) {
+    console.log(`[Form] Detail cost: "${data.potentialCost}"`);
+    const f = page.getByTestId("input-detail-cost");
+    await f.waitFor({ state: "visible", timeout: 5_000 });
+    await f.fill(data.potentialCost);
+  }
+  if (data.mitigationPlan) {
+    console.log("[Form] Detail mitigation plan");
+    await fillDetailTextField(page, "text-detail-mitigation", data.mitigationPlan);
+  }
+  if (data.dueDate) {
+    console.log(`[Form] WARNING: due date field not present in risk detail view — skipping "${data.dueDate}"`);
   }
 }
 
