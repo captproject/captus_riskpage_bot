@@ -1,5 +1,16 @@
 // ─── Login Bot Route — Simplified Allure output ──────────────────────────────
 // Displays only: ID, Scenario Description, Assertion Match in Allure report
+//
+// 2026-07-16 — Post-migration assertion fixes (Vercel/Render split):
+//   1. Expected landing page is now /projects (was /admin/companies on Replit).
+//      Overridable via EXPECTED_LANDING_PATH env var — next routing change is
+//      an env update on Render, not a code push.
+//   2. Toast capture is armed BEFORE the Sign In click. Previously the toast
+//      was checked after a 10s title wait, by which time the auto-dismissing
+//      toast was gone — guaranteed timing failure.
+//   3. The "Company Management" title assertion is removed. The content
+//      assertion is now the toast text itself:
+//      "Welcome back! You have been logged in successfully."
 
 import { BrowserContext, Page } from "playwright";
 import { config } from "../server";
@@ -32,6 +43,12 @@ const ERROR_KEYWORDS = [
   "invalid", "incorrect", "wrong", "not found", "doesn't exist",
   "failed", "denied", "unauthorized", "error",
 ];
+
+// ─── Post-Login Expectations (TC 1.1) ────────────────────────────────────────
+const EXPECTED_LANDING_PATH = process.env.EXPECTED_LANDING_PATH || "/projects";
+const TOAST_TITLE = "Welcome back!";
+const TOAST_BODY = "You have been logged in successfully";
+const EXPECTED_TOAST = `${TOAST_TITLE} ${TOAST_BODY}.`;
 
 // ─── Empty-Field Validation (TC 1.3) ──────────────────────────────────────────
 // Exact inline messages the Captus login form renders on empty/invalid submit.
@@ -124,6 +141,34 @@ export async function performLoginBot(input: LoginBotInput): Promise<LoginBotRes
       }, password);
     }
 
+    // ─── Arm toast capture BEFORE clicking Sign In ────────────────────────────
+    // The success toast auto-dismisses within a few seconds of login, so it must
+    // be intercepted the moment it renders — not after other assertions.
+    // Walks up from the matched text node until the container holds both the
+    // toast title and body, so the full message is captured.
+    let toastText = "";
+    let toastCapture: Promise<void> = Promise.resolve();
+    if (!isEmptyFieldScenario) {
+      toastCapture = page
+        .waitForSelector(`text=${TOAST_TITLE}`, { state: "visible", timeout: 15_000 })
+        .then(async (el) => {
+          if (!el) return;
+          toastText = await el.evaluate((node) => {
+            let cur: HTMLElement | null = node as HTMLElement;
+            for (let i = 0; i < 5 && cur; i++) {
+              const t = cur.innerText || "";
+              if (t.includes("Welcome back!") && t.includes("logged in successfully")) return t;
+              cur = cur.parentElement;
+            }
+            return (node as HTMLElement).innerText || "";
+          }).catch(() => "");
+        })
+        .catch(() => {
+          // Toast never appeared (negative scenario or genuine failure) — the
+          // success branch asserts on toastText and reports accordingly.
+        });
+    }
+
     await page.evaluate(() => {
       const btn = document.querySelector('button[data-testid="button-login"]') as HTMLButtonElement;
       if (btn) btn.click();
@@ -179,49 +224,33 @@ export async function performLoginBot(input: LoginBotInput): Promise<LoginBotRes
         ? `Empty-field validation working — ${detected.join(" + ")}`
         : `Empty-field validation issue — expected [${expected.join(" + ")}], got: ${statusActual}`;
     } else if (!stillOnLogin) {
+      // ─── TC 1.1: Authorized login — URL + toast assertions ────────────────
       const landingPage = new URL(currentUrl).pathname;
       const assertionResults: string[] = [];
       let allPassed = true;
 
-      const expectedUrl = "/admin/companies";
-      const urlPass = landingPage === expectedUrl;
+      const urlPass = landingPage === EXPECTED_LANDING_PATH;
       if (!urlPass) allPassed = false;
-      assertionResults.push(`URL: ${urlPass ? "PASS" : "FAIL"}`);
+      assertionResults.push(`URL: ${urlPass ? "PASS" : `FAIL (expected ${EXPECTED_LANDING_PATH}, got ${landingPage})`}`);
 
-      let actualTitle = "";
-      try {
-        const h1 = page.locator('[data-testid="text-page-title"]');
-        await h1.waitFor({ state: "visible", timeout: 10_000 });
-        actualTitle = (await h1.textContent())?.trim() || "";
-      } catch { actualTitle = "NOT FOUND"; }
-      const titlePass = actualTitle === "Company Management";
-      if (!titlePass) allPassed = false;
-      assertionResults.push(`Title: ${titlePass ? "PASS" : "FAIL"}`);
-
-      let actualToast = "";
-      try {
-        const toastLocator = page.locator("text=Welcome back!").first();
-        await toastLocator.waitFor({ state: "visible", timeout: 8_000 });
-        const toastParent = toastLocator.locator("xpath=ancestor::*[contains(@class,'toast') or contains(@role,'status') or contains(@class,'notification')]").first();
-        try {
-          actualToast = (await toastParent.textContent({ timeout: 3_000 }))?.trim() || "";
-        } catch {
-          const dp = toastLocator.locator("..");
-          actualToast = (await dp.textContent({ timeout: 3_000 }))?.trim() || "";
-          if (actualToast === "Welcome back!" || actualToast.length < 20) {
-            actualToast = (await dp.locator("..").textContent({ timeout: 3_000 }))?.trim() || actualToast;
-          }
-        }
-      } catch { actualToast = "TOAST NOT FOUND"; }
-      const toastPass = actualToast.includes("Welcome back!") && actualToast.includes("logged in successfully");
+      // Toast was armed before the Sign In click; by now it has either been
+      // captured or its 15s window has lapsed.
+      await toastCapture;
+      const toastPass = toastText.includes(TOAST_TITLE) && toastText.includes(TOAST_BODY);
       if (!toastPass) allPassed = false;
-      assertionResults.push(`Toast: ${toastPass ? "PASS" : "FAIL"}`);
+      assertionResults.push(
+        `Toast: ${toastPass ? "PASS" : `FAIL (expected "${EXPECTED_TOAST}", got "${toastText || "TOAST NOT FOUND"}")`}`
+      );
 
-      statusExpected = `Welcome back! You have been logged in successfully`;
-      statusActual = allPassed ? statusExpected : assertionResults.filter((r) => r.includes("FAIL")).join(" | ");
+      statusExpected = `Land on ${EXPECTED_LANDING_PATH} — toast: "${EXPECTED_TOAST}"`;
+      statusActual = allPassed
+        ? statusExpected
+        : assertionResults.filter((r) => r.includes("FAIL")).join(" | ");
       assertionMatch = allPassed ? "pass" : "fail";
       status = allPassed ? "success" : "failed";
-      message = allPassed ? "Login successful — landed on /admin/companies — all 3 assertions passed" : `Login succeeded but assertion(s) failed: ${assertionResults.filter((r) => r.includes("FAIL")).join("; ")}`;
+      message = allPassed
+        ? `Login successful — landed on ${EXPECTED_LANDING_PATH} — all assertions passed`
+        : `Login succeeded but assertion(s) failed: ${assertionResults.filter((r) => r.includes("FAIL")).join("; ")}`;
     } else {
       const bodyText = await page.evaluate(() => document.body.innerText);
       const detectedError = ERROR_KEYWORDS.find((w) => bodyText.toLowerCase().includes(w));
