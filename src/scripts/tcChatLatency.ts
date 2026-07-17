@@ -68,6 +68,7 @@ import { safeClose, closeBrowser } from "../services/browserManager";
 // (exported there for reuse). Importing the route module is side-effect-free:
 // server.ts guards app.listen() behind `require.main === module`.
 import { SEL, isBenignError } from "../routes/testChatMessage";
+import { config } from "../server";
 
 // ─── Tunables ───────────────────────────────────────────────────────────────
 
@@ -611,7 +612,19 @@ async function main(): Promise<void> {
     if (!guard.ok) throw new Error(`Company guard failed: ${guard.failure_reason}`);
 
     console.log("[TC_Chat_Latency] Opening chat...");
-    await openChat(page);
+    // TC_Chat_Message's proven flow: chat widget is exercised on /dashboard,
+    // reached via explicit navigation with networkidle. Login may leave the
+    // page on /projects, where the panel does not render the input reliably.
+    await page.goto(config.dashboardUrl, { waitUntil: "networkidle", timeout: 30_000 });
+    try {
+      await openChat(page);
+    } catch (err) {
+      await page.screenshot({
+        path: path.join(reportsDir, `chat_latency_${runTag}_openchat_failure.png`),
+        fullPage: true,
+      }).catch(() => {});
+      throw err;
+    }
 
     const results: QuestionMetrics[] = [];
     for (let i = 0; i < QUESTIONS.length; i++) {
