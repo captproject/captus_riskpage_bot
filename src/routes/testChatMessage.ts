@@ -74,7 +74,7 @@ const PERSISTENCE_TIMEOUT_MS = 10_000;
 
 // ─── Selectors ──────────────────────────────────────────────────────────────
 
-const SEL = {
+export const SEL = {
   chatWidget: 'button[data-testid="button-chat-widget"]',
   chatClose: 'button[data-testid="button-chat-close"]',
   chatInput: 'input[placeholder="Type a message..."]',
@@ -97,7 +97,7 @@ const BENIGN_ERROR_PATTERNS: RegExp[] = [
   /feedback-widget/i,         // Same as above, different match angle
 ];
 
-function isBenignError(text: string): boolean {
+export function isBenignError(text: string): boolean {
   return BENIGN_ERROR_PATTERNS.some((p) => p.test(text));
 }
 
