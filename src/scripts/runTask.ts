@@ -77,6 +77,15 @@ async function main(): Promise<void> {
       outcomes.push({ task: id, status: "error", detail: "Task not found in manifest", durationMs: 0 });
       continue;
     }
+    // Per-task health gate (faithful port of n8n's per-workflow CHECK_HEALTH):
+    // heavy tests can crash the bot service; wait for recovery before each task
+    // instead of firing at a dead service.
+    const healthy = await wakeRender(cfg, 180_000);
+    if (!healthy) {
+      outcomes.push({ task: id, status: "error", detail: "Bot service unavailable (did not recover before task)", durationMs: 0 });
+      console.error(`[Runner] ← ${id}: ERROR — bot did not recover, skipping`);
+      continue;
+    }
     console.log(`[Runner] → ${id}`);
     try {
       const outcome = await fn(cfg);
@@ -92,8 +101,12 @@ async function main(): Promise<void> {
   const failedList = outcomes.filter((o) => o.status !== "pass").map((o) => o.task);
   const failed = failedList.length;
 
-  // 4) Final Allure report for the whole run
-  if (suite) await finalizeReport(cfg);
+  // 4) Final Allure report for the whole run (health-gated: last task may have
+  //    crashed the bot; give it a chance to recover so the report still lands)
+  if (suite) {
+    await wakeRender(cfg, 180_000);
+    await finalizeReport(cfg);
+  }
 
   // 5) Supabase run-summary row (per-TC rows are written by the bot itself)
   await logOrchestratorResult(cfg, `RUN_${(suite || task || "unknown").toUpperCase()}`, failed === 0 ? "pass" : "fail", {
