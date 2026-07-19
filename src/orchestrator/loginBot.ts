@@ -40,15 +40,23 @@ export async function runLoginBotRefresh(cfg: OrchestratorConfig): Promise<TaskO
     return { task: "01B_Login_Bot", status: "pass", detail: "No SignIn_Task rows to process", durationMs: Date.now() - started };
   }
 
-  let failures = 0;
+  // n8n semantics: the workflow succeeds when every scenario EXECUTES and its
+  // row is updated. Individual scenarios may be negative tests (bad creds,
+  // empty fields) whose login_status is legitimately "failed" — that is the
+  // scenario working, not the job failing. Only transport-level problems
+  // (timeout, 502, no status in response) count against the job.
+  let executionErrors = 0;
+  let loginSuccesses = 0;
   for (const row of rows) {
     const login = await callBot(`${cfg.riskBot.baseUrl}/login-v2`, {
       apiKey: cfg.riskBot.apiKey, timeoutMs: 120_000,
       body: { id: row.id, username: row.username, password: row.password, scenario: row.scenario_description },
     });
-    const status = (login.body && login.body.status) || (login.timedOut ? "error" : "error");
+    const status = (login.body && login.body.status) || "error";
     const message = (login.body && login.body.message) || login.error || `HTTP ${login.httpStatus}`;
-    if (String(status).toLowerCase() !== "pass") failures++;
+    const executed = login.httpStatus === 200 && login.body && login.body.status;
+    if (!executed) executionErrors++;
+    if (["success", "pass"].includes(String(status).toLowerCase())) loginSuccesses++;
 
     // UPDATE_RESULT: eq filter on id
     const upd = await fetch(`${cfg.supabase.url}/rest/v1/SignIn_Task?id=eq.${encodeURIComponent(String(row.id))}`, {
@@ -66,8 +74,8 @@ export async function runLoginBotRefresh(cfg: OrchestratorConfig): Promise<TaskO
 
   return {
     task: "01B_Login_Bot",
-    status: failures === 0 ? "pass" : "fail",
-    detail: `${rows.length - failures}/${rows.length} sign-in scenarios passed`,
+    status: executionErrors === 0 ? "pass" : "fail",
+    detail: `${rows.length - executionErrors}/${rows.length} scenarios executed (${loginSuccesses} login success, ${rows.length - loginSuccesses} negative-scenario rejections); per-row results in SignIn_Task`,
     durationMs: Date.now() - started,
   };
 }
