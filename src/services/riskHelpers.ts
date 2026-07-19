@@ -293,6 +293,7 @@ export async function readRiskRowFromTable(page: Page, title: string): Promise<R
             if (t.startsWith("$") || t.includes(",")) cost = t;
             else if (
               t !== riskTitle && t !== "—" &&
+              !/^#\d+$/.test(t) && // CAP-138: table now shows an ID column ("#15979") — never mistake it for owner
               !knownStatuses.includes(t) && !knownCategories.includes(t) &&
               !/^\d{1,2}$/.test(t) && t.length > 1 && t.length < 50 &&
               !t.includes("Risk") && !t.includes(">")

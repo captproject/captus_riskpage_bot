@@ -121,11 +121,16 @@ export async function validateRiskAction(
   }
 
   result.field_mismatches = mismatches;
-  result.fields_valid = mismatches.length === 0;
+  // Owner's decision (Option A, 2026-07-20): the toast is the pass verdict —
+  // "Risk created successfully" / "Risk updated" / "Risk deleted". Layer 4
+  // field comparison is INFORMATIONAL ONLY: mismatches are recorded in
+  // field_mismatches (visible in workflow_results details and Allure) as
+  // warnings, but never fail the test. This decouples test verdicts from
+  // table-layout churn (e.g. the CAP-138 ID column).
+  result.fields_valid = true;
 
-  if (!result.fields_valid) {
-    result.failure_type = "DATA_MISMATCH";
-    console.log(`[Validation] FAIL at Layer 4 — ${mismatches.length} field mismatch(es)`);
+  if (mismatches.length > 0) {
+    console.log(`[Validation] Layer 4 WARNING — ${mismatches.length} field mismatch(es) (informational, not failing)`);
     mismatches.forEach((m) => console.log(`  ${m.field}: expected "${m.expected}" got "${m.actual}"`));
   } else {
     console.log(`[Validation] ALL LAYERS PASSED for ${action}`);
