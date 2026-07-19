@@ -3,7 +3,7 @@ import { BrowserContext } from "playwright";
 import { DeleteRiskInput, RiskResult } from "../utils/types";
 import { config } from "../server";
 import { createContextAndLogin } from "../services/loginService";
-import { searchRisk, detectToast, riskVisibleInPage } from "../services/riskHelpers";
+import { searchRisk, detectToast, riskVisibleInPage, findRiskRow } from "../services/riskHelpers";
 import { safeClose } from "../services/browserManager";
 import { captureFailure, uploadScreenshot } from "../utils/screenshot";
 
@@ -22,17 +22,11 @@ export async function performDeleteRisk(input: DeleteRiskInput): Promise<RiskRes
     context = session.context;
     const page = session.page;
 
-    // Navigate to table and search
-    await page.goto(config.tableUrl, { waitUntil: "networkidle", timeout: config.navigationTimeout });
-    await page.waitForTimeout(2_000);
-    await searchRisk(page, input.searchTitle);
-
-    // Click on risk row to expand it
-    const riskRow = page.locator("text=" + input.searchTitle).first();
-    try {
-      await riskRow.waitFor({ state: "visible", timeout: 5_000 });
-      await riskRow.click();
-    } catch {
+    // CAP-138: clicking the risk NAME navigates to /risks/:id now. Locate the
+    // row (row-risk-{id}) via table search and use ITS delete button
+    // (button-delete-risk-{id}) — hover to reveal, body-cell click as fallback.
+    const found = await findRiskRow(page, input.searchTitle);
+    if (!found) {
       const s = await page.screenshot({ fullPage: true });
       result.screenshots.failure = await uploadScreenshot(s, "delete_not_found");
       result.status = "failed";
@@ -40,11 +34,21 @@ export async function performDeleteRisk(input: DeleteRiskInput): Promise<RiskRes
       result.failure_type = "NOT_FOUND_TABLE";
       return result;
     }
-    await page.waitForTimeout(1_500);
-
-    // Click delete button
-    const deleteBtn = page.locator('[data-testid^="button-delete-risk-"]').first();
+    const { row, riskId } = found;
+    const deleteBtn = row.getByTestId(`button-delete-risk-${riskId}`);
     try {
+      await row.hover();
+      await page.waitForTimeout(500);
+      if (!(await deleteBtn.isVisible().catch(() => false))) {
+        await row.locator("td").nth(2).click();
+        await page.waitForTimeout(1_000);
+        const closeBtn = page.getByTestId("button-close-risk-detail");
+        if (await closeBtn.isVisible().catch(() => false)) {
+          await closeBtn.click();
+          await page.waitForTimeout(800);
+          await row.hover();
+        }
+      }
       await deleteBtn.waitFor({ state: "visible", timeout: 5_000 });
       await deleteBtn.click();
     } catch {

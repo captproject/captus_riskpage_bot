@@ -408,9 +408,23 @@ export async function openRiskDetail(page: Page, title: string): Promise<boolean
         await cardTitle.click();
       }
     }
-    // Close button is present as soon as the detail view opens (unlike Save Risk)
-    await page.getByTestId("button-close-risk-detail").waitFor({ state: "visible", timeout: 7_000 });
-    console.log(`[Detail] Opened risk detail for "${title}"`);
+    // Detail view detection (CAP-138): the deep-linked /risks/:id page may not
+    // carry button-close-risk-detail (that testid came from the old dashboard
+    // panel). Accept ANY of: URL becomes /risks/:id, the editable title field
+    // (text-detail-title) appears, or the legacy close button appears.
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      if (/\/risks\/\d+/.test(page.url())) break;
+      if (await page.getByTestId("text-detail-title").isVisible().catch(() => false)) break;
+      if (await page.getByTestId("button-close-risk-detail").isVisible().catch(() => false)) break;
+      await page.waitForTimeout(400);
+    }
+    const opened =
+      /\/risks\/\d+/.test(page.url()) ||
+      (await page.getByTestId("text-detail-title").isVisible().catch(() => false)) ||
+      (await page.getByTestId("button-close-risk-detail").isVisible().catch(() => false));
+    if (!opened) throw new Error("detail view not detected");
+    console.log(`[Detail] Opened risk detail for "${title}" (url: ${page.url()})`);
     return true;
   } catch {
     console.log(`[Detail] Could not open risk detail for "${title}"`);

@@ -45,7 +45,9 @@ function outcomeFromBot(task: string, res: BotCallResult): TaskOutcome {
   // pass/fail for sequencing and the Slack summary. Bot returns status "pass"
   // (the historic n8n SET_RESULT "success" mismatch is now irrelevant).
   const botStatus = typeof res.body === "object" && res.body ? String(res.body.status || "") : "";
-  const pass = res.ok && botStatus.toLowerCase() === "pass";
+  // Routes are inconsistent: most return "pass" but some (e.g. create/edit/delete
+  // RiskResult routes) return "success". Accept the family.
+  const pass = res.ok && ["pass", "passed", "success"].includes(botStatus.toLowerCase());
   return {
     task,
     status: res.timedOut || res.httpStatus === 0 ? "error" : pass ? "pass" : "fail",
