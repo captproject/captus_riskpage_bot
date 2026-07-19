@@ -225,8 +225,32 @@ export async function searchRisk(page: Page, title: string): Promise<boolean> {
 // ─── Search Risk on Dashboard (navigates first) ─────────────────────────────
 
 export async function searchRiskOnDashboard(page: Page, title: string): Promise<boolean> {
-  await navigateTo(page, config.dashboardUrl);
+  // UI change (CAP-138): input-search-risks was removed from the dashboard and
+  // now lives on the table page. Name kept for backwards compatibility.
+  await navigateTo(page, config.tableUrl);
   return searchRisk(page, title);
+}
+
+// ─── Find Risk Row by Title (table page, row-risk-{id} testids) ──────────────
+// Returns the row locator and the numeric risk id extracted from its testid.
+
+export async function findRiskRow(
+  page: Page,
+  title: string
+): Promise<{ row: import("playwright").Locator; riskId: string } | null> {
+  try {
+    await navigateTo(page, config.tableUrl);
+    await searchRisk(page, title);
+    const row = page.locator('tr[data-testid^="row-risk-"]', { hasText: title }).first();
+    await row.waitFor({ state: "visible", timeout: 7_000 });
+    const testId = (await row.getAttribute("data-testid")) || "";
+    const riskId = testId.replace("row-risk-", "");
+    console.log(`[FindRow] "${title}" → row-risk-${riskId}`);
+    return { row, riskId };
+  } catch {
+    console.log(`[FindRow] No row found for "${title}"`);
+    return null;
+  }
 }
 
 // ─── Read Risk Row from Table (old server.ts line 843) ───────────────────────
@@ -298,13 +322,27 @@ export async function readRiskRowFromTable(page: Page, title: string): Promise<R
 
 export async function deleteRiskFromTable(page: Page, title: string): Promise<boolean> {
   try {
-    await navigateTo(page, config.tableUrl);
-    await searchRisk(page, title);
-    const riskRow = page.locator("text=" + title).first();
-    await riskRow.waitFor({ state: "visible", timeout: 5_000 });
-    await riskRow.click();
-    await page.waitForTimeout(1_500);
-    const deleteBtn = page.locator('[data-testid^="button-delete-risk-"]').first();
+    // UI change (CAP-138): clicking the risk NAME now navigates to /risks/:id.
+    // The per-row delete button (button-delete-risk-{id}) is revealed on the
+    // row itself — hover first, then click a non-title cell if still hidden.
+    const found = await findRiskRow(page, title);
+    if (!found) throw new Error(`Row not found for "${title}"`);
+    const { row, riskId } = found;
+    const deleteBtn = row.getByTestId(`button-delete-risk-${riskId}`);
+    await row.hover();
+    await page.waitForTimeout(500);
+    if (!(await deleteBtn.isVisible().catch(() => false))) {
+      // Click the row body (category cell area), never the title link
+      await row.locator("td").nth(2).click();
+      await page.waitForTimeout(1_000);
+      // If that navigated to the detail view, close it and retry via hover
+      const closeBtn = page.getByTestId("button-close-risk-detail");
+      if (await closeBtn.isVisible().catch(() => false)) {
+        await closeBtn.click();
+        await page.waitForTimeout(800);
+        await row.hover();
+      }
+    }
     await deleteBtn.waitFor({ state: "visible", timeout: 5_000 });
     await deleteBtn.click();
     const toast = await detectToast(page, "Risk deleted successfully");
@@ -350,16 +388,24 @@ export async function clickFirstEditButton(page: Page): Promise<boolean> {
 
 export async function openRiskDetail(page: Page, title: string): Promise<boolean> {
   try {
-    // Risk cards carry data-testid="heatmap-risk-card-{id}" — filter by title text
-    const card = page.locator('[data-testid^="heatmap-risk-card-"]', { hasText: title }).first();
-    try {
-      await card.waitFor({ state: "visible", timeout: 5_000 });
-      await card.click();
-    } catch {
-      // Fallback: click the card heading directly
-      const cardTitle = page.locator("h4", { hasText: title }).first();
-      await cardTitle.waitFor({ state: "visible", timeout: 3_000 });
-      await cardTitle.click();
+    // Primary path (CAP-138 UI): table page → search → click the risk title
+    // link (link-risk-title-{id}) which navigates to the /risks/:id detail view.
+    // With 1500+ risks in the registry, a fresh risk may never surface on the
+    // dashboard heatmap, so the table is the only reliable route.
+    const found = await findRiskRow(page, title);
+    if (found) {
+      await found.row.getByTestId(`link-risk-title-${found.riskId}`).click();
+    } else {
+      // Fallback: legacy dashboard heatmap card
+      const card = page.locator('[data-testid^="heatmap-risk-card-"]', { hasText: title }).first();
+      try {
+        await card.waitFor({ state: "visible", timeout: 5_000 });
+        await card.click();
+      } catch {
+        const cardTitle = page.locator("h4", { hasText: title }).first();
+        await cardTitle.waitFor({ state: "visible", timeout: 3_000 });
+        await cardTitle.click();
+      }
     }
     // Close button is present as soon as the detail view opens (unlike Save Risk)
     await page.getByTestId("button-close-risk-detail").waitFor({ state: "visible", timeout: 7_000 });
