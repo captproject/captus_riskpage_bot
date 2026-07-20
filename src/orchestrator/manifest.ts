@@ -342,25 +342,34 @@ export const TASKS: Record<string, TaskFn> = {
 // because it deliberately kills the session, and TC_Audit_Log last as the
 // final core-functionality check before the report is produced.
 export const SUITES: Record<string, string[]> = {
+  // Reordered 2026-07-20: the three tests that crash the bot web service under
+  // memory pressure — sec11_injection, tc_score_matrix, tc_integration_tests
+  // (bulk ops) — are moved to the END. Previously a crash mid-sequence poisoned
+  // whichever functional test ran next (false 502s on create/status/etc.).
+  // Running the killers last means their crashes have nothing after them to
+  // corrupt; all functional results are captured before they run. The bot
+  // memory issue itself is a separate post-cutover investigation.
   daily_regression: [
-    "tc_integration_tests",      // was 01:25 UTC
-    "tc_project_selector",       // was 07:15
-    "tc_risk_registry_load",     // was 07:20
-    "tc_chat_message",           // was 07:22
-    "sec2_unauthorized_access",  // was 07:25
-    "tc_get_current_user",       // was 07:30
-    "sec6_invalid_webhook_auth", // was 07:30
-    "sec8_payload_validation",   // was 07:35
-    "sec11_injection",           // was 07:45
-    "tc_create_risk",            // was every 4h @ :05
-    "tc_edit_risk",              // was every 4h @ :08
-    "tc_delete_risk",            // was every 4h @ :09
-    "sec1_rate_limiting",        // was every 4h @ :12
-    "tc_score_matrix",           // was every 4h @ :15
-    "tc_filter_risks",           // was 19:44
-    "tc_risk_status_workflow",   // was 19:47
-    "tc_session_termination",    // was 20:10 — kills session, so near the end
-    "tc_audit_log",              // was every 23h — core audit check, runs last
+    // ── Functional + light security first (bot healthy) ──
+    "tc_project_selector",
+    "tc_risk_registry_load",
+    "tc_chat_message",
+    "tc_get_current_user",
+    "tc_create_risk",
+    "tc_edit_risk",
+    "tc_delete_risk",
+    "tc_filter_risks",
+    "tc_risk_status_workflow",
+    "sec2_unauthorized_access",
+    "sec6_invalid_webhook_auth",
+    "sec8_payload_validation",
+    "sec1_rate_limiting",
+    "tc_session_termination",    // kills session — after the other functional tests
+    "tc_audit_log",              // core audit check
+    // ── Known bot-crashers last (a crash here corrupts nothing downstream) ──
+    "tc_integration_tests",      // bulk operations — memory heavy
+    "tc_score_matrix",           // 25 sequential creates — memory heavy
+    "sec11_injection",           // ~5-min injection sweep — reliably crashes the bot
   ],
 
   // Manual (was: 98_Critical_Test_Runner, manual trigger only)
