@@ -4,7 +4,19 @@
 // logOrchestratorResult() writes rows for checks the bot never sees
 //                (SEC-2 direct API probes, negative-auth expectations, run summaries).
 
+import { Agent } from "undici";
 import { OrchestratorConfig } from "./config";
+
+// Node's built-in fetch (undici) enforces a hidden 300s headersTimeout by
+// default, independent of any AbortController signal. Bot calls that hold the
+// connection silently past 5 minutes (bulk operations ~5.5min, sec11 ~5min)
+// abort with a generic "fetch failed" while the bot completes server-side —
+// the same ceiling class as n8n's ECONNABORTED at 240s. This dispatcher
+// raises the ceiling above the longest configured timeoutMs (600s).
+const longRunningDispatcher = new Agent({
+  headersTimeout: 660_000,
+  bodyTimeout: 660_000,
+});
 
 export interface BotCallResult {
   ok: boolean;
@@ -37,7 +49,9 @@ export async function callBot(
       headers,
       body: method === "POST" && body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
-    });
+      // undici-specific option; not in the standard fetch types
+      dispatcher: longRunningDispatcher,
+    } as RequestInit & { dispatcher: Agent });
     const text = await res.text();
     let parsed: any = text;
     try { parsed = JSON.parse(text); } catch { /* keep raw text */ }
