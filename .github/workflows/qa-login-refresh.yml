@@ -1,0 +1,33 @@
+name: QA Login Refresh
+
+on:
+  schedule:
+    - cron: '30 * * * *'   # hourly at :30, offset from the 01:00 regression
+  workflow_dispatch:
+
+concurrency:
+  group: qa-regression
+  cancel-in-progress: false
+
+jobs:
+  login-refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+      - name: Run login refresh
+        run: node dist/scripts/runTask.js --task login_bot_refresh
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          RISK_BOT_URL: ${{ secrets.RISK_BOT_URL }}
+          RISK_BOT_API_KEY: ${{ secrets.RISK_BOT_API_KEY }}
+          LOGIN_BOT_API_KEY: ${{ secrets.LOGIN_BOT_API_KEY }}

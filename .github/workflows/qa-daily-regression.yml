@@ -1,0 +1,51 @@
+name: QA Daily Regression
+
+on:
+  schedule:
+    - cron: '0 1 * * *'   # 01:00 UTC = 06:30 IST
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'What to run: "suite:<name>" or "task:<id>"'
+        required: false
+        default: 'suite:daily_regression'
+
+concurrency:
+  group: qa-regression
+  cancel-in-progress: false
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+      - name: Resolve target
+        id: target
+        run: |
+          TARGET="${{ github.event.inputs.target || 'suite:daily_regression' }}"
+          KIND="${TARGET%%:*}"
+          NAME="${TARGET#*:}"
+          if [ "$KIND" != "suite" ] && [ "$KIND" != "task" ]; then
+            echo "Invalid target '$TARGET' — use suite:<name> or task:<id>" >&2
+            exit 2
+          fi
+          echo "flag=--$KIND" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME"   >> "$GITHUB_OUTPUT"
+      - name: Run pipeline
+        run: node dist/scripts/runTask.js ${{ steps.target.outputs.flag }} ${{ steps.target.outputs.name }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          RISK_BOT_URL: ${{ secrets.RISK_BOT_URL }}
+          RISK_BOT_API_KEY: ${{ secrets.RISK_BOT_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SEC2_TARGET_BASE: ${{ vars.SEC2_TARGET_BASE }}
